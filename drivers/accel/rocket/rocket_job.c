@@ -102,6 +102,7 @@ rocket_copy_tasks(struct drm_device *dev,
 
 fail:
 	kvfree(rjob->tasks);
+	rjob->tasks = NULL;
 	return ret;
 }
 

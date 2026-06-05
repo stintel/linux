@@ -19,12 +19,19 @@ static void rocket_gem_bo_free(struct drm_gem_object *obj)
 
 	drm_WARN_ON(obj->dev, refcount_read(&bo->base.pages_use_count) > 1);
 
-	unmapped = iommu_unmap(bo->domain->domain, bo->mm.start, bo->size);
-	drm_WARN_ON(obj->dev, unmapped != bo->size);
+	if (bo->domain) {
+		unmapped = iommu_unmap(bo->domain->domain, bo->mm.start, bo->size);
+		drm_WARN_ON(obj->dev, unmapped != bo->size);
+	}
 
-	mutex_lock(&rocket_priv->mm_lock);
-	drm_mm_remove_node(&bo->mm);
-	mutex_unlock(&rocket_priv->mm_lock);
+	if (drm_mm_node_allocated(&bo->mm)) {
+		drm_WARN_ON(obj->dev, !rocket_priv);
+		if (rocket_priv) {
+			mutex_lock(&rocket_priv->mm_lock);
+			drm_mm_remove_node(&bo->mm);
+			mutex_unlock(&rocket_priv->mm_lock);
+		}
+	}
 
 	rocket_iommu_domain_put(bo->domain);
 	bo->domain = NULL;

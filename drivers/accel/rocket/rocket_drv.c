@@ -65,7 +65,8 @@ rocket_iommu_domain_get(struct rocket_file_priv *rocket_priv)
 void
 rocket_iommu_domain_put(struct rocket_iommu_domain *domain)
 {
-	kref_put(&domain->kref, rocket_iommu_domain_destroy);
+	if (domain)
+		kref_put(&domain->kref, rocket_iommu_domain_destroy);
 }
 
 static void
@@ -91,7 +92,8 @@ rocket_file_priv_get(struct rocket_file_priv *rocket_priv)
 void
 rocket_file_priv_put(struct rocket_file_priv *rocket_priv)
 {
-	kref_put(&rocket_priv->kref, rocket_file_priv_release);
+	if (rocket_priv)
+		kref_put(&rocket_priv->kref, rocket_file_priv_release);
 }
 
 static int
