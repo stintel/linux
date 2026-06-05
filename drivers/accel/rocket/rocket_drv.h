@@ -24,7 +24,9 @@ struct rocket_file_priv {
 	struct drm_mm mm;
 	struct mutex mm_lock;
 
-	struct drm_sched_entity sched_entity;
+	struct drm_sched_entity *sched_entities;
+	unsigned int num_sched_entities;
+	unsigned int next_sched_entity;
 };
 
 struct rocket_iommu_domain *rocket_iommu_domain_get(struct rocket_file_priv *rocket_priv);

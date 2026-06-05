@@ -497,35 +497,51 @@ void rocket_job_fini(struct rocket_core *core)
 int rocket_job_open(struct rocket_file_priv *rocket_priv)
 {
 	struct rocket_device *rdev = rocket_priv->rdev;
-	struct drm_gpu_scheduler **scheds = kmalloc_objs(*scheds,
-							 rdev->num_cores);
 	unsigned int core;
 	int ret;
 
-	if (!scheds)
+	if (!rdev->num_cores)
+		return -ENODEV;
+
+	rocket_priv->sched_entities = kvmalloc_array(rdev->num_cores,
+						     sizeof(*rocket_priv->sched_entities),
+						     GFP_KERNEL);
+	if (!rocket_priv->sched_entities)
 		return -ENOMEM;
 
-	for (core = 0; core < rdev->num_cores; core++)
-		scheds[core] = &rdev->cores[core].sched;
+	for (core = 0; core < rdev->num_cores; core++) {
+		struct drm_gpu_scheduler *sched = &rdev->cores[core].sched;
 
-	ret = drm_sched_entity_init(&rocket_priv->sched_entity,
-				    DRM_SCHED_PRIORITY_NORMAL,
-				    scheds,
-				    rdev->num_cores, NULL);
-	if (WARN_ON(ret)) {
-		kfree(scheds);
-		return ret;
+		ret = drm_sched_entity_init(&rocket_priv->sched_entities[core],
+					    DRM_SCHED_PRIORITY_NORMAL,
+					    &sched, 1, NULL);
+		if (WARN_ON(ret))
+			goto err_entities;
 	}
 
+	rocket_priv->num_sched_entities = rdev->num_cores;
+
 	return 0;
+
+err_entities:
+	while (core--)
+		drm_sched_entity_destroy(&rocket_priv->sched_entities[core]);
+
+	kvfree(rocket_priv->sched_entities);
+	rocket_priv->sched_entities = NULL;
+	return ret;
 }
 
 void rocket_job_close(struct rocket_file_priv *rocket_priv)
 {
-	struct drm_sched_entity *entity = &rocket_priv->sched_entity;
+	unsigned int core;
 
-	drm_sched_entity_destroy(entity);
-	kfree(entity->sched_list);
+	for (core = 0; core < rocket_priv->num_sched_entities; core++)
+		drm_sched_entity_destroy(&rocket_priv->sched_entities[core]);
+
+	kvfree(rocket_priv->sched_entities);
+	rocket_priv->sched_entities = NULL;
+	rocket_priv->num_sched_entities = 0;
 }
 
 int rocket_job_is_idle(struct rocket_core *core)
@@ -537,11 +553,43 @@ int rocket_job_is_idle(struct rocket_core *core)
 	return true;
 }
 
+static struct drm_sched_entity *
+rocket_job_pick_entity(struct rocket_file_priv *file_priv)
+{
+	struct rocket_device *rdev = file_priv->rdev;
+	unsigned int count = file_priv->num_sched_entities;
+	unsigned int best, start;
+	unsigned int best_score = UINT_MAX;
+
+	if (count == 1)
+		return &file_priv->sched_entities[0];
+
+	start = file_priv->next_sched_entity % count;
+	best = start;
+
+	for (unsigned int i = 0; i < count; i++) {
+		unsigned int core = (start + i) % count;
+		unsigned int score = atomic_read(rdev->cores[core].sched.score);
+
+		if (score < best_score) {
+			best = core;
+			best_score = score;
+			if (!score)
+				break;
+		}
+	}
+
+	file_priv->next_sched_entity = (best + 1) % count;
+
+	return &file_priv->sched_entities[best];
+}
+
 static int rocket_ioctl_submit_job(struct drm_device *dev, struct drm_file *file,
 				   struct drm_rocket_job *job)
 {
 	struct rocket_device *rdev = to_rocket_device(dev);
 	struct rocket_file_priv *file_priv = file->driver_priv;
+	struct drm_sched_entity *entity;
 	struct rocket_job *rjob = NULL;
 	int ret = 0;
 
@@ -556,9 +604,11 @@ static int rocket_ioctl_submit_job(struct drm_device *dev, struct drm_file *file
 
 	rjob->rdev = rdev;
 
-	ret = drm_sched_job_init(&rjob->base,
-				 &file_priv->sched_entity,
-				 1, NULL, file->client_id);
+	scoped_guard(mutex, &rdev->sched_lock) {
+		entity = rocket_job_pick_entity(file_priv);
+		ret = drm_sched_job_init(&rjob->base, entity, 1, NULL,
+					 file->client_id);
+	}
 	if (ret)
 		goto out_put_job;
 
