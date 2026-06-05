@@ -17,6 +17,7 @@ struct rocket_iommu_domain {
 };
 
 struct rocket_file_priv {
+	struct kref kref;
 	struct rocket_device *rdev;
 
 	struct rocket_iommu_domain *domain;
@@ -28,5 +29,7 @@ struct rocket_file_priv {
 
 struct rocket_iommu_domain *rocket_iommu_domain_get(struct rocket_file_priv *rocket_priv);
 void rocket_iommu_domain_put(struct rocket_iommu_domain *domain);
+struct rocket_file_priv *rocket_file_priv_get(struct rocket_file_priv *rocket_priv);
+void rocket_file_priv_put(struct rocket_file_priv *rocket_priv);
 
 #endif

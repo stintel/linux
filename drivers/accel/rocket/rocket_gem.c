@@ -30,6 +30,7 @@ static void rocket_gem_bo_free(struct drm_gem_object *obj)
 	bo->domain = NULL;
 
 	drm_gem_shmem_free(&bo->base);
+	rocket_file_priv_put(rocket_priv);
 }
 
 static const struct drm_gem_object_funcs rocket_gem_funcs = {
@@ -74,7 +75,7 @@ int rocket_ioctl_create_bo(struct drm_device *dev, void *data, struct drm_file *
 	gem_obj = &shmem_obj->base;
 	rkt_obj = to_rocket_bo(gem_obj);
 
-	rkt_obj->driver_priv = rocket_priv;
+	rkt_obj->driver_priv = rocket_file_priv_get(rocket_priv);
 	rkt_obj->domain = rocket_iommu_domain_get(rocket_priv);
 	rkt_obj->size = args->size;
 	rkt_obj->offset = 0;

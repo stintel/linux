@@ -68,6 +68,32 @@ rocket_iommu_domain_put(struct rocket_iommu_domain *domain)
 	kref_put(&domain->kref, rocket_iommu_domain_destroy);
 }
 
+static void
+rocket_file_priv_release(struct kref *kref)
+{
+	struct rocket_file_priv *rocket_priv =
+		container_of(kref, struct rocket_file_priv, kref);
+
+	mutex_destroy(&rocket_priv->mm_lock);
+	drm_mm_takedown(&rocket_priv->mm);
+	rocket_iommu_domain_put(rocket_priv->domain);
+	kfree(rocket_priv);
+	module_put(THIS_MODULE);
+}
+
+struct rocket_file_priv *
+rocket_file_priv_get(struct rocket_file_priv *rocket_priv)
+{
+	kref_get(&rocket_priv->kref);
+	return rocket_priv;
+}
+
+void
+rocket_file_priv_put(struct rocket_file_priv *rocket_priv)
+{
+	kref_put(&rocket_priv->kref, rocket_file_priv_release);
+}
+
 static int
 rocket_open(struct drm_device *dev, struct drm_file *file)
 {
@@ -85,6 +111,7 @@ rocket_open(struct drm_device *dev, struct drm_file *file)
 		goto err_put_mod;
 	}
 
+	kref_init(&rocket_priv->kref);
 	rocket_priv->rdev = rdev;
 	rocket_priv->domain = rocket_iommu_domain_create(rdev->cores[0].dev);
 	if (IS_ERR(rocket_priv->domain)) {
@@ -106,9 +133,8 @@ rocket_open(struct drm_device *dev, struct drm_file *file)
 	return 0;
 
 err_mm_takedown:
-	mutex_destroy(&rocket_priv->mm_lock);
-	drm_mm_takedown(&rocket_priv->mm);
-	rocket_iommu_domain_put(rocket_priv->domain);
+	rocket_file_priv_put(rocket_priv);
+	return ret;
 err_free:
 	kfree(rocket_priv);
 err_put_mod:
@@ -122,11 +148,7 @@ rocket_postclose(struct drm_device *dev, struct drm_file *file)
 	struct rocket_file_priv *rocket_priv = file->driver_priv;
 
 	rocket_job_close(rocket_priv);
-	mutex_destroy(&rocket_priv->mm_lock);
-	drm_mm_takedown(&rocket_priv->mm);
-	rocket_iommu_domain_put(rocket_priv->domain);
-	kfree(rocket_priv);
-	module_put(THIS_MODULE);
+	rocket_file_priv_put(rocket_priv);
 }
 
 static const struct drm_ioctl_desc rocket_drm_driver_ioctls[] = {
