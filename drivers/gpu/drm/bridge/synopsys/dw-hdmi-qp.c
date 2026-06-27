@@ -239,10 +239,14 @@ static int dw_hdmi_qp_match_tmds_n_table(struct dw_hdmi_qp *hdmi,
 	case 44100:
 	case 88200:
 	case 176400:
+	case 352800:
+	case 705600:
 		return (freq / 44100) * tmds_n->n_44k1;
 	case 48000:
 	case 96000:
 	case 192000:
+	case 384000:
+	case 768000:
 		return (freq / 48000) * tmds_n->n_48k;
 	default:
 		return -ENOENT;
@@ -330,14 +334,25 @@ static unsigned int dw_hdmi_qp_find_cts(struct dw_hdmi_qp *hdmi, unsigned long p
 	case 44100:
 	case 88200:
 	case 176400:
+	case 352800:
+	case 705600:
 		return tmds_cts->cts_44k1;
 	case 48000:
 	case 96000:
 	case 192000:
+	case 384000:
+	case 768000:
 		return tmds_cts->cts_48k;
 	default:
 		return -ENOENT;
 	}
+}
+
+static bool dw_hdmi_qp_is_hbr_audio(struct hdmi_codec_params *hparms)
+{
+	return hparms->channels == 8 &&
+	       hparms->sample_rate >= 176400 &&
+	       hparms->iec.status[0] & IEC958_AES0_NONAUDIO;
 }
 
 static void dw_hdmi_qp_set_audio_interface(struct dw_hdmi_qp *hdmi,
@@ -345,6 +360,7 @@ static void dw_hdmi_qp_set_audio_interface(struct dw_hdmi_qp *hdmi,
 					   struct hdmi_codec_params *hparms)
 {
 	u32 conf0 = 0;
+	bool hbr_audio = dw_hdmi_qp_is_hbr_audio(hparms);
 
 	/* Reset the audio data path of the AVP */
 	dw_hdmi_qp_write(hdmi, AVP_DATAPATH_PACKET_AUDIO_SWINIT_P, GLOBAL_SWRESET_REQUEST);
@@ -384,11 +400,12 @@ static void dw_hdmi_qp_set_audio_interface(struct dw_hdmi_qp *hdmi,
 	 */
 	switch (fmt->bit_fmt) {
 	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE:
-		conf0 = (hparms->channels == 8) ? AUD_HBR : AUD_ASP;
+		conf0 = hbr_audio ? AUD_HBR : AUD_ASP;
 		conf0 |= I2S_BPCUV_RCV_EN;
 		break;
 	default:
-		conf0 = AUD_ASP | I2S_BPCUV_RCV_DIS;
+		conf0 = hbr_audio ? AUD_HBR : AUD_ASP;
+		conf0 |= I2S_BPCUV_RCV_DIS;
 		break;
 	}
 
@@ -482,6 +499,7 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 				    struct hdmi_codec_params *hparms)
 {
 	struct dw_hdmi_qp *hdmi = dw_hdmi_qp_from_bridge(bridge);
+	unsigned int sample_rate = hparms->sample_rate;
 	bool ref2stream = false;
 
 	if (!hdmi->tmds_char_rate)
@@ -496,7 +514,11 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 		ref2stream = true;
 
 	dw_hdmi_qp_set_audio_interface(hdmi, fmt, hparms);
-	dw_hdmi_qp_set_sample_rate(hdmi, hdmi->tmds_char_rate, hparms->sample_rate);
+
+	if ((dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_CONFIG0) & AUD_FORMAT_MSK) == AUD_HBR)
+		sample_rate = 768000;
+
+	dw_hdmi_qp_set_sample_rate(hdmi, hdmi->tmds_char_rate, sample_rate);
 	dw_hdmi_qp_set_channel_status(hdmi, hparms->iec.status, ref2stream);
 	drm_atomic_helper_connector_hdmi_update_audio_infoframe(connector, &hparms->cea);
 
