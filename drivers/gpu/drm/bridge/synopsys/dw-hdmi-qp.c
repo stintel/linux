@@ -42,6 +42,20 @@
 
 #define SCRAMB_POLL_DELAY_MS	3000
 
+#define HBR_DEBUG_BPCUV_RCV		BIT(0)
+#define HBR_DEBUG_ACR_NATIVE		BIT(1)
+#define HBR_DEBUG_CS_NATIVE		BIT(2)
+#define HBR_DEBUG_REF2STREAM		BIT(3)
+#define HBR_DEBUG_FORCE_ASP		BIT(4)
+#define HBR_DEBUG_INFOFRAME_MLP		BIT(5)
+#define HBR_DEBUG_INFOFRAME_DTS_HD	BIT(6)
+#define HBR_DEBUG_INFOFRAME_8CH		BIT(7)
+
+static unsigned int hbr_debug;
+module_param(hbr_debug, uint, 0644);
+MODULE_PARM_DESC(hbr_debug,
+		 "Debug HBR audio: bit0=BPCUV receive, bit1=native ACR, bit2=native CS, bit3=ref2stream, bit4=force ASP, bit5=MLP infoframe, bit6=DTS-HD infoframe, bit7=8ch infoframe");
+
 /*
  * Unless otherwise noted, entries in this table are 100% optimization.
  * Values can be obtained from dw_hdmi_qp_compute_n() but that function is
@@ -350,6 +364,9 @@ static unsigned int dw_hdmi_qp_find_cts(struct dw_hdmi_qp *hdmi, unsigned long p
 
 static bool dw_hdmi_qp_is_hbr_audio(struct hdmi_codec_params *hparms)
 {
+	if (hbr_debug & HBR_DEBUG_FORCE_ASP)
+		return false;
+
 	return hparms->channels == 8 &&
 	       hparms->sample_rate >= 176400 &&
 	       hparms->iec.status[0] & IEC958_AES0_NONAUDIO;
@@ -405,7 +422,8 @@ static void dw_hdmi_qp_set_audio_interface(struct dw_hdmi_qp *hdmi,
 		break;
 	default:
 		conf0 = hbr_audio ? AUD_HBR : AUD_ASP;
-		conf0 |= I2S_BPCUV_RCV_DIS;
+		conf0 |= hbr_audio && (hbr_debug & HBR_DEBUG_BPCUV_RCV) ?
+			 I2S_BPCUV_RCV_EN : I2S_BPCUV_RCV_DIS;
 		break;
 	}
 
@@ -426,7 +444,8 @@ static void dw_hdmi_qp_set_audio_interface(struct dw_hdmi_qp *hdmi,
  * (for S/PDIF interface this information comes from the stream).
  */
 static void dw_hdmi_qp_set_channel_status(struct dw_hdmi_qp *hdmi,
-					  u8 *channel_status, bool ref2stream)
+					  u8 *channel_status, bool ref2stream,
+					  bool hbr_fixup)
 {
 	/*
 	 * AUDPKT_CHSTATUS_OVR0: { RSV, RSV, CS1, CS0 }
@@ -450,7 +469,7 @@ static void dw_hdmi_qp_set_channel_status(struct dw_hdmi_qp *hdmi,
 	if (ref2stream)
 		channel_status[0] |= IEC958_AES0_NONAUDIO;
 
-	if ((dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_CONFIG0) & GENMASK(25, 24)) == AUD_HBR) {
+	if (hbr_fixup) {
 		/* fixup cs for HBR */
 		channel_status[3] = (channel_status[3] & 0xf0) | IEC958_AES3_CON_FS_768000;
 		channel_status[4] = (channel_status[4] & 0x0f) | IEC958_AES4_CON_ORIGFS_NOTID;
@@ -499,7 +518,9 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 				    struct hdmi_codec_params *hparms)
 {
 	struct dw_hdmi_qp *hdmi = dw_hdmi_qp_from_bridge(bridge);
+	struct hdmi_audio_infoframe cea = hparms->cea;
 	unsigned int sample_rate = hparms->sample_rate;
+	bool hbr_audio;
 	bool ref2stream = false;
 
 	if (!hdmi->tmds_char_rate)
@@ -514,13 +535,47 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 		ref2stream = true;
 
 	dw_hdmi_qp_set_audio_interface(hdmi, fmt, hparms);
+	hbr_audio = (dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_CONFIG0) & AUD_FORMAT_MSK) == AUD_HBR;
 
-	if ((dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_CONFIG0) & AUD_FORMAT_MSK) == AUD_HBR)
+	if (hbr_audio && !(hbr_debug & HBR_DEBUG_ACR_NATIVE))
 		sample_rate = 768000;
 
+	if (hbr_audio && (hbr_debug & HBR_DEBUG_REF2STREAM))
+		ref2stream = true;
+
+	if (hbr_audio && (hbr_debug & HBR_DEBUG_INFOFRAME_MLP))
+		cea.coding_type = HDMI_AUDIO_CODING_TYPE_MLP;
+	else if (hbr_audio && (hbr_debug & HBR_DEBUG_INFOFRAME_DTS_HD))
+		cea.coding_type = HDMI_AUDIO_CODING_TYPE_DTS_HD;
+
+	if (hbr_audio && (hbr_debug & HBR_DEBUG_INFOFRAME_8CH))
+		cea.channels = 8;
+
+	dev_info(hdmi->dev,
+		 "audio prepare: fmt=%d rate=%u channels=%u iec=%*phN conf0=%#x acr_rate=%u hbr_debug=%#x ref2stream=%d cea_ct=%u cea_ch=%u\n",
+		 fmt->bit_fmt, hparms->sample_rate, hparms->channels,
+		 (int)sizeof(hparms->iec.status), hparms->iec.status,
+		 dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_CONFIG0),
+		 sample_rate, hbr_debug, ref2stream, cea.coding_type,
+		 cea.channels);
+
 	dw_hdmi_qp_set_sample_rate(hdmi, hdmi->tmds_char_rate, sample_rate);
-	dw_hdmi_qp_set_channel_status(hdmi, hparms->iec.status, ref2stream);
-	drm_atomic_helper_connector_hdmi_update_audio_infoframe(connector, &hparms->cea);
+	dw_hdmi_qp_set_channel_status(hdmi, hparms->iec.status, ref2stream,
+				      hbr_audio && !(hbr_debug & HBR_DEBUG_CS_NATIVE));
+	drm_atomic_helper_connector_hdmi_update_audio_infoframe(connector, &cea);
+	dev_info(hdmi->dev,
+		 "audio regs: if_cfg0=%#x if_cfg1=%#x if_ctl0=%#x if_st0=%#x pkt_en=%#x audpkt_ctl0=%#x acr0=%#x acr1=%#x acr_st0=%#x cs0=%#x cs1=%#x\n",
+		 dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_CONFIG0),
+		 dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_CONFIG1),
+		 dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_CONTROL0),
+		 dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_STATUS0),
+		 dw_hdmi_qp_read(hdmi, PKTSCHED_PKT_EN),
+		 dw_hdmi_qp_read(hdmi, AUDPKT_CONTROL0),
+		 dw_hdmi_qp_read(hdmi, AUDPKT_ACR_CONTROL0),
+		 dw_hdmi_qp_read(hdmi, AUDPKT_ACR_CONTROL1),
+		 dw_hdmi_qp_read(hdmi, AUDPKT_ACR_STATUS0),
+		 dw_hdmi_qp_read(hdmi, AUDPKT_CHSTATUS_OVR0),
+		 dw_hdmi_qp_read(hdmi, AUDPKT_CHSTATUS_OVR1));
 
 	return 0;
 }
@@ -1062,6 +1117,9 @@ static int dw_hdmi_qp_bridge_write_audio_infoframe(struct drm_bridge *bridge,
 	 * PB5: | DM_INH | LSV3 | LSV2 | LSV1 | LSV0 | F52 | F51 | F50 |
 	 * PB6~PB10: Reserved
 	 */
+	dev_info(hdmi->dev, "audio infoframe: len=%zu data=%*phN\n",
+		 len, (int)len, buffer);
+
 	dw_hdmi_qp_write_infoframe(hdmi, buffer, len, PKT_AUDI_CONTENTS0);
 
 	/* Enable ACR, AUDI, AMD */
