@@ -318,6 +318,14 @@ static int dmaengine_copy(struct snd_soc_component *component,
 	return 0;
 }
 
+static int dmaengine_ack(struct snd_soc_component *component,
+			 struct snd_pcm_substream *substream)
+{
+	struct dmaengine_pcm *pcm = soc_component_to_pcm(component);
+
+	return snd_dmaengine_pcm_process_ack(substream, pcm->config->process);
+}
+
 static int dmaengine_pcm_sync_stop(struct snd_soc_component *component,
 				   struct snd_pcm_substream *substream)
 {
@@ -345,6 +353,7 @@ static const struct snd_soc_component_driver dmaengine_pcm_component_process = {
 	.trigger	= dmaengine_pcm_trigger,
 	.pointer	= dmaengine_pcm_pointer,
 	.copy		= dmaengine_copy,
+	.ack		= dmaengine_ack,
 	.pcm_new	= dmaengine_pcm_new,
 	.sync_stop	= dmaengine_pcm_sync_stop,
 };

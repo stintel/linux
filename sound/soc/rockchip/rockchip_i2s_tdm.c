@@ -702,6 +702,7 @@ static int rockchip_i2s_tdm_hw_params(struct snd_pcm_substream *substream,
 		val |= I2S_TXCR_VDW(24);
 		break;
 	case SNDRV_PCM_FORMAT_S32_LE:
+	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE:
 		val |= I2S_TXCR_VDW(32);
 		break;
 	default:
@@ -843,6 +844,57 @@ static const struct snd_soc_dai_ops rockchip_i2s_tdm_dai_ops = {
 static const struct snd_soc_component_driver rockchip_i2s_tdm_component = {
 	.name = DRV_NAME,
 	.legacy_dai_naming = 1,
+};
+
+/*
+ * The DesignWare HDMI audio path expects IEC958 subframes in a hardware
+ * layout that is different from ALSA's IEC958_SUBFRAME_LE userspace ABI.
+ *
+ * ALSA provides:
+ *   bits 31..28: PCUV/preamble bits
+ *   bits 27..4 : audio payload
+ *
+ * The DesignWare HDMI I2S path expects:
+ *   bit  31    : IEC958 block-start bit
+ *   bit  30    : parity
+ *   bit  29    : channel status
+ *   bit  28    : user data
+ *   bit  27    : validity
+ *   bits 26..11: audio payload
+ *   bits 10..0 : padding
+ *
+ * For dmaengine PCM the process callback is applied on both copy/write and
+ * mmap ack paths.
+ */
+static int rockchip_i2s_tdm_pcm_process(struct snd_pcm_substream *substream,
+					int channel, unsigned long hwoff,
+					unsigned long bytes)
+{
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	u32 *ptr = (u32 *)(runtime->dma_area + hwoff +
+			   channel * (runtime->dma_bytes / runtime->channels));
+	unsigned long samples = bytes / sizeof(*ptr);
+	unsigned long i;
+
+	if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK)
+		return 0;
+
+	if (runtime->format != SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE)
+		return 0;
+
+	for (i = 0; i < samples; i++) {
+		u32 sample = ptr[i];
+		u32 block_start = (sample & 0xf) == 0x8 ? BIT(31) : 0;
+
+		ptr[i] = ((sample & GENMASK(31, 12)) >> 1) | block_start;
+	}
+
+	return 0;
+}
+
+static const struct snd_dmaengine_pcm_config rockchip_i2s_tdm_pcm_config = {
+	.prepare_slave_config = snd_dmaengine_pcm_prepare_slave_config,
+	.process = rockchip_i2s_tdm_pcm_process,
 };
 
 static bool rockchip_i2s_tdm_wr_reg(struct device *dev, unsigned int reg)
@@ -1052,7 +1104,8 @@ static int rockchip_i2s_tdm_init_dai(struct rk_i2s_tdm_dev *i2s_tdm)
 	const char *dma_name;
 	u64 formats = (SNDRV_PCM_FMTBIT_S8 | SNDRV_PCM_FMTBIT_S16_LE |
 		       SNDRV_PCM_FMTBIT_S20_3LE | SNDRV_PCM_FMTBIT_S24_LE |
-		       SNDRV_PCM_FMTBIT_S32_LE);
+		       SNDRV_PCM_FMTBIT_S32_LE |
+		       SNDRV_PCM_FMTBIT_IEC958_SUBFRAME_LE);
 	struct device_node *node = i2s_tdm->dev->of_node;
 
 	of_property_for_each_string(node, "dma-names", dma_names, dma_name) {
@@ -1372,7 +1425,8 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 		goto err_suspend;
 	}
 
-	ret = devm_snd_dmaengine_pcm_register(&pdev->dev, NULL, 0);
+	ret = devm_snd_dmaengine_pcm_register(&pdev->dev,
+					      &rockchip_i2s_tdm_pcm_config, 0);
 	if (ret) {
 		dev_err(&pdev->dev, "Could not register PCM\n");
 		goto err_suspend;

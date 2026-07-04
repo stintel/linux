@@ -24,6 +24,7 @@ struct dmaengine_pcm_runtime_data {
 	dma_cookie_t cookie;
 
 	unsigned int pos;
+	snd_pcm_uframes_t process_appl_ptr;
 };
 
 static inline struct dmaengine_pcm_runtime_data *substream_to_prtd(
@@ -270,6 +271,81 @@ snd_pcm_uframes_t snd_dmaengine_pcm_pointer(struct snd_pcm_substream *substream)
 	return bytes_to_frames(runtime, pos);
 }
 EXPORT_SYMBOL_GPL(snd_dmaengine_pcm_pointer);
+
+/**
+ * snd_dmaengine_pcm_process_ack - process mmap playback data committed by user space
+ * @substream: PCM substream
+ * @process: sample processing callback
+ *
+ * Generic dmaengine PCM applies @process from its copy callback.  mmap users
+ * bypass that path, so process newly committed mmap playback frames from the
+ * PCM ack callback instead.
+ *
+ * Return: 0 on success, a negative error code otherwise
+ */
+int snd_dmaengine_pcm_process_ack(struct snd_pcm_substream *substream,
+	int (*process)(struct snd_pcm_substream *substream,
+		       int channel, unsigned long hwoff,
+		       unsigned long bytes))
+{
+	struct dmaengine_pcm_runtime_data *prtd = substream_to_prtd(substream);
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	snd_pcm_uframes_t boundary = runtime->boundary;
+	snd_pcm_uframes_t buffer_size = runtime->buffer_size;
+	snd_pcm_uframes_t old = prtd->process_appl_ptr;
+	snd_pcm_uframes_t new = runtime->control->appl_ptr;
+	snd_pcm_uframes_t frames;
+	int ret;
+
+	if (!process)
+		return 0;
+
+	if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK)
+		return 0;
+
+	if (runtime->access != SNDRV_PCM_ACCESS_MMAP_INTERLEAVED)
+		return 0;
+
+	if (new >= old)
+		frames = new - old;
+	else
+		frames = boundary - old + new;
+
+	if (!frames)
+		return 0;
+
+	/*
+	 * This should not normally happen for a valid playback appl_ptr
+	 * update.  If it does, process the whole ring rather than walking more
+	 * than one buffer and corrupting already-processed samples.
+	 */
+	if (frames > buffer_size) {
+		frames = buffer_size;
+		old = new >= buffer_size ? new - buffer_size :
+					   boundary - (buffer_size - new);
+	}
+
+	while (frames) {
+		snd_pcm_uframes_t ofs = old % buffer_size;
+		snd_pcm_uframes_t todo = min(frames, buffer_size - ofs);
+		unsigned long hwoff = frames_to_bytes(runtime, ofs);
+		unsigned long bytes = frames_to_bytes(runtime, todo);
+
+		ret = process(substream, 0, hwoff, bytes);
+		if (ret < 0)
+			return ret;
+
+		old += todo;
+		if (old >= boundary)
+			old -= boundary;
+		frames -= todo;
+	}
+
+	prtd->process_appl_ptr = new;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_dmaengine_pcm_process_ack);
 
 /**
  * snd_dmaengine_pcm_request_channel - Request channel for the dmaengine PCM
