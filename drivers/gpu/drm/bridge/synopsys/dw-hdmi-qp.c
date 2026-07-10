@@ -411,6 +411,8 @@ static void dw_hdmi_qp_set_audio_interface(struct dw_hdmi_qp *hdmi,
 static void dw_hdmi_qp_set_channel_status(struct dw_hdmi_qp *hdmi,
 					  u8 *channel_status, bool ref2stream)
 {
+	bool hbr;
+
 	/*
 	 * AUDPKT_CHSTATUS_OVR0: { RSV, RSV, CS1, CS0 }
 	 * AUDPKT_CHSTATUS_OVR1: { CS6, CS5, CS4, CS3 }
@@ -433,7 +435,9 @@ static void dw_hdmi_qp_set_channel_status(struct dw_hdmi_qp *hdmi,
 	if (ref2stream)
 		channel_status[0] |= IEC958_AES0_NONAUDIO;
 
-	if ((dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_CONFIG0) & GENMASK(25, 24)) == AUD_HBR) {
+	hbr = (dw_hdmi_qp_read(hdmi, AUDIO_INTERFACE_CONFIG0) &
+	       AUD_FORMAT_MSK) == AUD_HBR;
+	if (hbr) {
 		/* fixup cs for HBR */
 		channel_status[3] = (channel_status[3] & 0xf0) | IEC958_AES3_CON_FS_768000;
 		channel_status[4] = (channel_status[4] & 0x0f) | IEC958_AES4_CON_ORIGFS_NOTID;
@@ -444,7 +448,13 @@ static void dw_hdmi_qp_set_channel_status(struct dw_hdmi_qp *hdmi,
 
 	regmap_bulk_write(hdmi->regm, AUDPKT_CHSTATUS_OVR1, &channel_status[3], 1);
 
-	if (ref2stream)
+	/*
+	 * In HBR mode the incoming stream describes the 192 kHz carrier, while
+	 * the HDMI channel status must describe the 768 kHz HBR link.  Override
+	 * the stream channel status and regenerate parity after applying the HBR
+	 * fixup above.
+	 */
+	if (ref2stream && !hbr)
 		dw_hdmi_qp_mod(hdmi, 0,
 			       AUDPKT_PBIT_FORCE_EN_MASK | AUDPKT_CHSTATUS_OVR_EN_MASK,
 			       AUDPKT_CONTROL0);
