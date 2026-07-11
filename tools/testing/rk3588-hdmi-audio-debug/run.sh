@@ -28,7 +28,8 @@ Usage: $0 baseline
        $0 restore
        $0 list
 
-Cases: 8ch-48k 2ch-96k 4ch-96k 8ch-96k 2ch-192k
+Cases: 8ch-48k 2ch-96k 4ch-96k 4ch-96k-s16 8ch-96k
+       2ch-192k 2ch-192k-s16
 
 Environment:
   RK3588_HDMI_AUDIO_CARD       ALSA card ID (default: hdmi0)
@@ -126,6 +127,8 @@ cleanup()
 
 case_parameters()
 {
+	FORMAT=S32_LE
+
 	case $1 in
 	8ch-48k)
 		CHANNELS=8
@@ -139,6 +142,11 @@ case_parameters()
 		CHANNELS=4
 		RATE=96000
 		;;
+	4ch-96k-s16)
+		CHANNELS=4
+		RATE=96000
+		FORMAT=S16_LE
+		;;
 	8ch-96k)
 		CHANNELS=8
 		RATE=96000
@@ -146,6 +154,11 @@ case_parameters()
 	2ch-192k)
 		CHANNELS=2
 		RATE=192000
+		;;
+	2ch-192k-s16)
+		CHANNELS=2
+		RATE=192000
+		FORMAT=S16_LE
 		;;
 	*)
 		die "unknown case: $1"
@@ -256,7 +269,7 @@ run_case()
 		echo "case=$name"
 		echo "channels=$CHANNELS"
 		echo "rate=$RATE"
-		echo "format=S32_LE"
+		echo "format=$FORMAT"
 		echo "layout=$layout"
 		echo "sample_present=$sample_present"
 		echo "tx_fifo_prefill_us=$active_prefill"
@@ -276,7 +289,7 @@ run_case()
 	echo "running $name layout=$layout sample_present=$sample_present prefill=$active_prefill"
 	timeout --signal=TERM --kill-after=1 "$DURATION" \
 		speaker-test -D "hw:CARD=$CARD,DEV=$PCM_DEVICE" \
-		-F S32_LE -c "$CHANNELS" -r "$RATE" -t sine \
+		-F "$FORMAT" -c "$CHANNELS" -r "$RATE" -t sine \
 		> "$case_dir/speaker-test.log" 2>&1 &
 	RUNNER_PID=$!
 
@@ -350,7 +363,8 @@ case $command in
 	exit 0
 	;;
 list)
-	echo '8ch-48k 2ch-96k 4ch-96k 8ch-96k 2ch-192k'
+	echo '8ch-48k 2ch-96k 4ch-96k 4ch-96k-s16 8ch-96k'
+	echo '2ch-192k 2ch-192k-s16'
 	exit 0
 	;;
 baseline|matrix|run|status|restore)
