@@ -29,7 +29,7 @@ Usage: $0 baseline
        $0 list
 
 Cases: 8ch-48k 2ch-96k 4ch-96k 4ch-96k-s16 8ch-96k
-       2ch-192k 2ch-192k-s16
+       2ch-192k 2ch-192k-s16 8ch-192k
 
 FORMAT may be S16_LE, S24_LE, or S32_LE; the case default is S32_LE.
 
@@ -161,6 +161,10 @@ case_parameters()
 		CHANNELS=2
 		RATE=192000
 		FORMAT=S16_LE
+		;;
+	8ch-192k)
+		CHANNELS=8
+		RATE=192000
 		;;
 	*)
 		die "unknown case: $1"
@@ -372,7 +376,7 @@ case $command in
 	;;
 list)
 	echo '8ch-48k 2ch-96k 4ch-96k 4ch-96k-s16 8ch-96k'
-	echo '2ch-192k 2ch-192k-s16'
+	echo '2ch-192k 2ch-192k-s16 8ch-192k'
 	exit 0
 	;;
 baseline|matrix|run|status|restore)
