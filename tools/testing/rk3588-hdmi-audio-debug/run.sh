@@ -23,13 +23,15 @@ usage()
 	cat <<EOF
 Usage: $0 baseline
        $0 matrix
-       $0 run CASE [auto|0|1] [auto|0xNNNN] [current|0-20]
+       $0 run CASE [auto|0|1] [auto|0xNNNN] [current|0-20] [FORMAT]
        $0 status
        $0 restore
        $0 list
 
 Cases: 8ch-48k 2ch-96k 4ch-96k 4ch-96k-s16 8ch-96k
        2ch-192k 2ch-192k-s16
+
+FORMAT may be S16_LE, S24_LE, or S32_LE; the case default is S32_LE.
 
 Environment:
   RK3588_HDMI_AUDIO_CARD       ALSA card ID (default: hdmi0)
@@ -235,12 +237,18 @@ run_case()
 	local layout=${2:-auto}
 	local sample_present=${3:-auto}
 	local prefill=${4:-current}
+	local format_override=${5:-}
 	local active_prefill=unavailable
 	local timestamp
 	local case_dir
 	local rc
 
 	case_parameters "$name"
+	if [[ -n $format_override ]]; then
+		FORMAT=$format_override
+	fi
+	[[ $FORMAT == S16_LE || $FORMAT == S24_LE || $FORMAT == S32_LE ]] ||
+		die "format must be S16_LE, S24_LE, or S32_LE"
 	[[ $layout == auto || $layout =~ ^[01]$ ]] ||
 		die "layout must be auto, 0, or 1"
 	[[ $sample_present == auto ||
@@ -257,7 +265,7 @@ run_case()
 		die "TX FIFO prefill control is unavailable"
 	fi
 	timestamp=$(date '+%Y%m%d-%H%M%S')
-	case_dir=$RESULT_ROOT/${timestamp}-${name}-layout-${layout}
+	case_dir=$RESULT_ROOT/${timestamp}-${name}-format-${FORMAT}-layout-${layout}
 	case_dir+=-sp-${sample_present}-prefill-${active_prefill}
 	case_dir=${case_dir//0x/}
 	mkdir -p "$case_dir"
@@ -406,11 +414,11 @@ status)
 	cat "$SYSFS_DIR/audio_debug_status"
 	;;
 run)
-	[[ $# -ge 2 && $# -le 5 ]] ||
-		die "run requires CASE [LAYOUT] [SAMPLE_PRESENT] [PREFILL_US]"
+	[[ $# -ge 2 && $# -le 6 ]] ||
+		die "run requires CASE [LAYOUT] [SAMPLE_PRESENT] [PREFILL_US] [FORMAT]"
 	RESULT_ROOT=$RESULT_PARENT/rk3588-hdmi-audio-$(date '+%Y%m%d-%H%M%S')
 	mkdir -p "$RESULT_ROOT"
-	run_case "$2" "${3:-auto}" "${4:-auto}" "${5:-current}"
+	run_case "$2" "${3:-auto}" "${4:-auto}" "${5:-current}" "${6:-}"
 	echo "results: $RESULT_ROOT"
 	;;
 baseline)
