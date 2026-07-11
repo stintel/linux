@@ -135,6 +135,7 @@
 #define AUDIO_INTERFACE_CONTROL0			0x82c
 #define AUDIO_FIFO_CLR_P				BIT(0)
 #define AUDIO_INTERFACE_STATUS0				0x834
+#define I2S_PAIR_LAYOUT_MSK				GENMASK(15, 0)
 /* Frame Composer Registers */
 #define FRAME_COMPOSER_CONFIG0				0x840
 #define FRAME_COMPOSER_CONFIG1				0x844
@@ -420,6 +421,7 @@
 #define AUDPKT_ACR_CTS_OVR_EN_MSK			BIT(1)
 #define AUDPKT_ACR_CTS_OVR_EN				BIT(1)
 #define AUDPKT_ACR_STATUS0				0xe4c
+#define AUDPKT_ACR_CTS_MEASURED_VALUE			GENMASK(19, 0)
 #define AUDPKT_CHSTATUS_OVR0				0xe60
 #define AUDPKT_CHSTATUS_OVR1				0xe64
 /* IEC60958 Byte 3: Sampleing frenuency Bits 24 to 27 */

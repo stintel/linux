@@ -178,10 +178,22 @@ struct dw_hdmi_qp {
 		struct mutex lock; /* serializes audio register access */
 		struct device_attribute status_attr;
 		struct device_attribute clear_errors_attr;
-		struct attribute *attrs[3];
+		struct device_attribute layout_attr;
+		struct device_attribute sample_present_attr;
+		struct attribute *attrs[5];
 		struct attribute_group group;
+		int layout;
+		bool sample_present_override;
+		u16 sample_present;
+		bool override_settings_touched;
 		bool registered;
 	} audio_debug;
+};
+
+enum dw_hdmi_qp_audio_debug_layout {
+	DW_HDMI_QP_AUDIO_LAYOUT_AUTO = -1,
+	DW_HDMI_QP_AUDIO_LAYOUT_0,
+	DW_HDMI_QP_AUDIO_LAYOUT_1,
 };
 
 #define AVP_0_AUDIO_ERROR_CLEAR_MASK \
@@ -301,6 +313,28 @@ dw_hdmi_qp_from_audio_debug_clear_errors_attr(struct device_attribute *attr)
 	return hdmi;
 }
 
+static struct dw_hdmi_qp *
+dw_hdmi_qp_from_audio_debug_layout_attr(struct device_attribute *attr)
+{
+	struct dw_hdmi_qp *hdmi;
+
+	hdmi = container_of(attr, struct dw_hdmi_qp,
+			    audio_debug.layout_attr);
+
+	return hdmi;
+}
+
+static struct dw_hdmi_qp *
+dw_hdmi_qp_from_audio_debug_sample_present_attr(struct device_attribute *attr)
+{
+	struct dw_hdmi_qp *hdmi;
+
+	hdmi = container_of(attr, struct dw_hdmi_qp,
+			    audio_debug.sample_present_attr);
+
+	return hdmi;
+}
+
 static ssize_t audio_debug_status_show(struct device *dev,
 				       struct device_attribute *attr, char *buf)
 {
@@ -349,8 +383,9 @@ static ssize_t audio_debug_status_show(struct device *dev,
 	len += sysfs_emit_at(buf, len,
 			     "audio_if_status0=0x%08x pair_layout=0x%04x\n",
 			     status.audio_if_status0,
-			     (unsigned int)(status.audio_if_status0 &
-					    GENMASK(15, 0)));
+			     (unsigned int)
+			     FIELD_GET(I2S_PAIR_LAYOUT_MSK,
+				       status.audio_if_status0));
 	len += sysfs_emit_at(buf, len,
 			     "audpkt_control0=0x%08x layout_override=%u layout=%u sample_present_override=%u\n",
 			     status.audpkt_control0,
@@ -373,7 +408,9 @@ static ssize_t audio_debug_status_show(struct device *dev,
 			     FIELD_GET(AUDPKT_ACR_CTS_OVR_VAL_MSK,
 				       status.acr_control1),
 			     status.acr_status0,
-			     FIELD_GET(AUDPKT_ACR_N_VALUE, status.acr_status0));
+			     (unsigned int)
+			     FIELD_GET(AUDPKT_ACR_CTS_MEASURED_VALUE,
+				       status.acr_status0));
 	len += sysfs_emit_at(buf, len,
 			     "pkt_enable=0x%08x pkt_status0=0x%08x pkt_status1=0x%08x\n",
 			     status.pkt_enable, status.pkt_status0,
@@ -434,6 +471,103 @@ static ssize_t audio_debug_clear_errors_store(struct device *dev,
 	return ret ? ret : count;
 }
 
+static ssize_t audio_debug_layout_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct dw_hdmi_qp *hdmi =
+		dw_hdmi_qp_from_audio_debug_layout_attr(attr);
+	int layout;
+
+	mutex_lock(&hdmi->audio_debug.lock);
+	layout = hdmi->audio_debug.layout;
+	mutex_unlock(&hdmi->audio_debug.lock);
+
+	if (layout == DW_HDMI_QP_AUDIO_LAYOUT_AUTO)
+		return sysfs_emit(buf, "auto\n");
+
+	return sysfs_emit(buf, "%d\n", layout);
+}
+
+static ssize_t audio_debug_layout_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct dw_hdmi_qp *hdmi =
+		dw_hdmi_qp_from_audio_debug_layout_attr(attr);
+	int layout;
+	int ret;
+
+	if (sysfs_streq(buf, "auto")) {
+		layout = DW_HDMI_QP_AUDIO_LAYOUT_AUTO;
+	} else {
+		ret = kstrtoint(buf, 0, &layout);
+		if (ret)
+			return ret;
+		if (layout != DW_HDMI_QP_AUDIO_LAYOUT_0 &&
+		    layout != DW_HDMI_QP_AUDIO_LAYOUT_1)
+			return -EINVAL;
+	}
+
+	mutex_lock(&hdmi->audio_debug.lock);
+	hdmi->audio_debug.layout = layout;
+	hdmi->audio_debug.override_settings_touched = true;
+	mutex_unlock(&hdmi->audio_debug.lock);
+
+	return count;
+}
+
+static ssize_t audio_debug_sample_present_show(struct device *dev,
+					       struct device_attribute *attr,
+					       char *buf)
+{
+	struct dw_hdmi_qp *hdmi =
+		dw_hdmi_qp_from_audio_debug_sample_present_attr(attr);
+	bool override;
+	u16 value;
+
+	mutex_lock(&hdmi->audio_debug.lock);
+	override = hdmi->audio_debug.sample_present_override;
+	value = hdmi->audio_debug.sample_present;
+	mutex_unlock(&hdmi->audio_debug.lock);
+
+	if (!override)
+		return sysfs_emit(buf, "auto\n");
+
+	return sysfs_emit(buf, "0x%04x\n", value);
+}
+
+static ssize_t audio_debug_sample_present_store(struct device *dev,
+						struct device_attribute *attr,
+						const char *buf, size_t count)
+{
+	struct dw_hdmi_qp *hdmi =
+		dw_hdmi_qp_from_audio_debug_sample_present_attr(attr);
+	bool override = true;
+	u16 value = 0;
+	int ret;
+
+	if (sysfs_streq(buf, "auto")) {
+		override = false;
+	} else {
+		if (count < 3)
+			return -EINVAL;
+		if (buf[0] != '0' || (buf[1] != 'x' && buf[1] != 'X'))
+			return -EINVAL;
+
+		ret = kstrtou16(buf + 2, 16, &value);
+		if (ret)
+			return ret;
+	}
+
+	mutex_lock(&hdmi->audio_debug.lock);
+	hdmi->audio_debug.sample_present_override = override;
+	hdmi->audio_debug.sample_present = value;
+	hdmi->audio_debug.override_settings_touched = true;
+	mutex_unlock(&hdmi->audio_debug.lock);
+
+	return count;
+}
+
 int dw_hdmi_qp_audio_debug_register(struct dw_hdmi_qp *hdmi)
 {
 	int ret;
@@ -442,12 +576,21 @@ int dw_hdmi_qp_audio_debug_register(struct dw_hdmi_qp *hdmi)
 		__ATTR_RO(audio_debug_status);
 	hdmi->audio_debug.clear_errors_attr = (struct device_attribute)
 		__ATTR_WO(audio_debug_clear_errors);
+	hdmi->audio_debug.layout_attr = (struct device_attribute)
+		__ATTR_RW(audio_debug_layout);
+	hdmi->audio_debug.sample_present_attr = (struct device_attribute)
+		__ATTR_RW(audio_debug_sample_present);
 	sysfs_attr_init(&hdmi->audio_debug.status_attr.attr);
 	sysfs_attr_init(&hdmi->audio_debug.clear_errors_attr.attr);
+	sysfs_attr_init(&hdmi->audio_debug.layout_attr.attr);
+	sysfs_attr_init(&hdmi->audio_debug.sample_present_attr.attr);
 
 	hdmi->audio_debug.attrs[0] = &hdmi->audio_debug.status_attr.attr;
 	hdmi->audio_debug.attrs[1] =
 		&hdmi->audio_debug.clear_errors_attr.attr;
+	hdmi->audio_debug.attrs[2] = &hdmi->audio_debug.layout_attr.attr;
+	hdmi->audio_debug.attrs[3] =
+		&hdmi->audio_debug.sample_present_attr.attr;
 	hdmi->audio_debug.group.attrs = hdmi->audio_debug.attrs;
 
 	ret = device_add_group(hdmi->dev, &hdmi->audio_debug.group);
@@ -729,15 +872,57 @@ static void dw_hdmi_qp_set_channel_status(struct dw_hdmi_qp *hdmi,
 			       AUDPKT_CONTROL0);
 }
 
-static void dw_hdmi_qp_set_sample_rate(struct dw_hdmi_qp *hdmi, unsigned long long tmds_char_rate,
-				       unsigned int sample_rate)
+struct dw_hdmi_qp_acr {
+	unsigned int n;
+	unsigned int cts;
+};
+
+static struct dw_hdmi_qp_acr
+dw_hdmi_qp_set_sample_rate(struct dw_hdmi_qp *hdmi,
+			   unsigned long long tmds_char_rate,
+			   unsigned int sample_rate)
 {
-	unsigned int n, cts;
+	struct dw_hdmi_qp_acr acr;
 
-	n = dw_hdmi_qp_find_n(hdmi, tmds_char_rate, sample_rate);
-	cts = dw_hdmi_qp_find_cts(hdmi, tmds_char_rate, sample_rate);
+	acr.n = dw_hdmi_qp_find_n(hdmi, tmds_char_rate, sample_rate);
+	acr.cts = dw_hdmi_qp_find_cts(hdmi, tmds_char_rate, sample_rate);
 
-	dw_hdmi_qp_set_cts_n(hdmi, cts, n);
+	dw_hdmi_qp_set_cts_n(hdmi, acr.cts, acr.n);
+
+	return acr;
+}
+
+static void dw_hdmi_qp_audio_debug_apply_overrides(struct dw_hdmi_qp *hdmi)
+{
+	u32 enable = 0;
+	u32 layout;
+
+	/* Preserve the original register programming until a control is used. */
+	if (!hdmi->audio_debug.override_settings_touched)
+		return;
+
+	/* Disable both override paths before changing their values. */
+	dw_hdmi_qp_mod(hdmi, 0,
+		       AUDPKT_LAYOUT_OVR_EN | AUDPKT_SAMPLE_PRESENT_OVR_EN,
+		       AUDPKT_CONTROL0);
+
+	if (hdmi->audio_debug.layout != DW_HDMI_QP_AUDIO_LAYOUT_AUTO) {
+		layout = hdmi->audio_debug.layout ?
+			 AUDPKT_LAYOUT_OVR_VALUE : 0;
+		dw_hdmi_qp_mod(hdmi, layout, AUDPKT_LAYOUT_OVR_VALUE,
+			       AUDPKT_CONTROL0);
+		enable |= AUDPKT_LAYOUT_OVR_EN;
+	}
+
+	if (hdmi->audio_debug.sample_present_override) {
+		dw_hdmi_qp_mod(hdmi, hdmi->audio_debug.sample_present,
+			       AUDPKT_SAMPLE_PRESENT_OVR_VALUE,
+			       AUDPKT_CONTROL1);
+		enable |= AUDPKT_SAMPLE_PRESENT_OVR_EN;
+	}
+
+	if (enable)
+		dw_hdmi_qp_mod(hdmi, enable, enable, AUDPKT_CONTROL0);
 }
 
 static int dw_hdmi_qp_audio_enable(struct drm_bridge *bridge,
@@ -759,6 +944,10 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 				    struct hdmi_codec_params *hparms)
 {
 	struct dw_hdmi_qp *hdmi = dw_hdmi_qp_from_bridge(bridge);
+	struct dw_hdmi_qp_acr acr;
+	char sample_present[16];
+	const char *layout;
+	const char *packet;
 	bool ref2stream = false;
 
 	if (fmt->bit_clk_provider | fmt->frame_clk_provider) {
@@ -777,10 +966,32 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 
 	dw_hdmi_qp_audio_clear_errors(hdmi);
 	dw_hdmi_qp_set_audio_interface(hdmi, fmt, hparms);
-	dw_hdmi_qp_set_sample_rate(hdmi, hdmi->tmds_char_rate, hparms->sample_rate);
+	acr = dw_hdmi_qp_set_sample_rate(hdmi, hdmi->tmds_char_rate,
+					 hparms->sample_rate);
 	dw_hdmi_qp_set_channel_status(hdmi, hparms->iec.status, ref2stream);
-	mutex_unlock(&hdmi->audio_debug.lock);
+	dw_hdmi_qp_audio_debug_apply_overrides(hdmi);
+
+	if (hdmi->audio_debug.layout == DW_HDMI_QP_AUDIO_LAYOUT_AUTO)
+		layout = "auto";
+	else if (hdmi->audio_debug.layout == DW_HDMI_QP_AUDIO_LAYOUT_0)
+		layout = "0";
+	else
+		layout = "1";
+
+	if (hdmi->audio_debug.sample_present_override)
+		scnprintf(sample_present, sizeof(sample_present), "0x%04x",
+			  hdmi->audio_debug.sample_present);
+	else
+		strscpy(sample_present, "auto", sizeof(sample_present));
+
+	packet = fmt->bit_fmt == SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE &&
+		 hparms->channels == 8 ? "HBR" : "ASP";
+	dev_dbg(hdmi->dev,
+		"audio prepare: rate=%u channels=%u format=%d packet=%s layout=%s sample_present=%s n=%u cts=%u\n",
+		hparms->sample_rate, hparms->channels, fmt->bit_fmt, packet,
+		layout, sample_present, acr.n, acr.cts);
 	drm_atomic_helper_connector_hdmi_update_audio_infoframe(connector, &hparms->cea);
+	mutex_unlock(&hdmi->audio_debug.lock);
 
 	return 0;
 }
@@ -1632,6 +1843,7 @@ struct dw_hdmi_qp *dw_hdmi_qp_bind(struct platform_device *pdev,
 
 	hdmi->dev = dev;
 	mutex_init(&hdmi->audio_debug.lock);
+	hdmi->audio_debug.layout = DW_HDMI_QP_AUDIO_LAYOUT_AUTO;
 
 	regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(regs))
