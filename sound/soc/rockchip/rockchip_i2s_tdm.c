@@ -260,6 +260,9 @@ static inline void rockchip_enable_tde(struct regmap *regmap)
 {
 	regmap_update_bits(regmap, I2S_DMACR, I2S_DMACR_TDE_ENABLE,
 			   I2S_DMACR_TDE_ENABLE);
+
+	/* Allow DMA to prefill every active TX FIFO before starting XFER. */
+	udelay(1);
 }
 
 static inline void rockchip_disable_tde(struct regmap *regmap)
