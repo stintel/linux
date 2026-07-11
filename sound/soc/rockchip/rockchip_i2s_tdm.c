@@ -30,6 +30,35 @@
 #define TRCM_TX 1
 #define TRCM_RX 2
 
+static unsigned int tx_fifo_prefill_us = 1;
+
+static int param_set_tx_fifo_prefill_us(const char *val,
+					const struct kernel_param *kp)
+{
+	unsigned int delay;
+	int ret;
+
+	ret = kstrtouint(val, 0, &delay);
+	if (ret)
+		return ret;
+	if (delay > 20)
+		return -ERANGE;
+
+	WRITE_ONCE(*(unsigned int *)kp->arg, delay);
+
+	return 0;
+}
+
+static const struct kernel_param_ops tx_fifo_prefill_us_ops = {
+	.set = param_set_tx_fifo_prefill_us,
+	.get = param_get_uint,
+};
+
+module_param_cb(tx_fifo_prefill_us, &tx_fifo_prefill_us_ops,
+		&tx_fifo_prefill_us, 0644);
+MODULE_PARM_DESC(tx_fifo_prefill_us,
+		 "Temporary TX DMA FIFO prefill delay in microseconds (0-20)");
+
 struct txrx_config {
 	u32 addr;
 	u32 reg;
@@ -258,11 +287,14 @@ static void rockchip_snd_xfer_clear(struct rk_i2s_tdm_dev *i2s_tdm,
 
 static inline void rockchip_enable_tde(struct regmap *regmap)
 {
+	unsigned int delay = READ_ONCE(tx_fifo_prefill_us);
+
 	regmap_update_bits(regmap, I2S_DMACR, I2S_DMACR_TDE_ENABLE,
 			   I2S_DMACR_TDE_ENABLE);
 
 	/* Allow DMA to prefill every active TX FIFO before starting XFER. */
-	udelay(1);
+	if (delay)
+		udelay(delay);
 }
 
 static inline void rockchip_disable_tde(struct regmap *regmap)
