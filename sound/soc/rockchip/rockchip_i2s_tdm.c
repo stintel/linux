@@ -15,6 +15,7 @@
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/spinlock.h>
+#include <linux/sysfs.h>
 #include <sound/dmaengine_pcm.h>
 #include <sound/pcm_params.h>
 
@@ -23,6 +24,10 @@
 #define DRV_NAME "rockchip-i2s-tdm"
 
 #define DEFAULT_MCLK_FS				256
+#define DEFAULT_TX_DMA_MAXBURST			8
+#define DEFAULT_TX_FIFO_THRESHOLD		16
+#define MAX_TX_DMA_MAXBURST			16
+#define MAX_TX_FIFO_THRESHOLD			31
 #define CH_GRP_MAX				4  /* The max channel 8 / 2 */
 #define MULTIPLEX_CH_MAX			10
 
@@ -101,6 +106,79 @@ struct rk_i2s_tdm_dev {
 	struct snd_soc_dai_driver *dai;
 	unsigned int mclk_rx_freq;
 	unsigned int mclk_tx_freq;
+	unsigned int tx_dma_maxburst;
+	unsigned int tx_fifo_threshold;
+};
+
+/* Temporary controls for diagnosing high-rate RK3588 HDMI playback. */
+static ssize_t audio_debug_tx_fifo_threshold_show(struct device *dev,
+						  struct device_attribute *attr,
+						  char *buf)
+{
+	struct rk_i2s_tdm_dev *i2s_tdm = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", READ_ONCE(i2s_tdm->tx_fifo_threshold));
+}
+
+static ssize_t audio_debug_tx_fifo_threshold_store(struct device *dev,
+						   struct device_attribute *attr,
+						   const char *buf,
+						   size_t count)
+{
+	struct rk_i2s_tdm_dev *i2s_tdm = dev_get_drvdata(dev);
+	unsigned int threshold;
+	int ret;
+
+	ret = kstrtouint(buf, 0, &threshold);
+	if (ret)
+		return ret;
+	if (!threshold || threshold > MAX_TX_FIFO_THRESHOLD)
+		return -ERANGE;
+
+	WRITE_ONCE(i2s_tdm->tx_fifo_threshold, threshold);
+
+	return count;
+}
+static DEVICE_ATTR_RW(audio_debug_tx_fifo_threshold);
+
+static ssize_t audio_debug_tx_dma_maxburst_show(struct device *dev,
+						struct device_attribute *attr,
+						char *buf)
+{
+	struct rk_i2s_tdm_dev *i2s_tdm = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", READ_ONCE(i2s_tdm->tx_dma_maxburst));
+}
+
+static ssize_t audio_debug_tx_dma_maxburst_store(struct device *dev,
+						 struct device_attribute *attr,
+						 const char *buf,
+						 size_t count)
+{
+	struct rk_i2s_tdm_dev *i2s_tdm = dev_get_drvdata(dev);
+	unsigned int maxburst;
+	int ret;
+
+	ret = kstrtouint(buf, 0, &maxburst);
+	if (ret)
+		return ret;
+	if (!maxburst || maxburst > MAX_TX_DMA_MAXBURST)
+		return -ERANGE;
+
+	WRITE_ONCE(i2s_tdm->tx_dma_maxburst, maxburst);
+
+	return count;
+}
+static DEVICE_ATTR_RW(audio_debug_tx_dma_maxburst);
+
+static struct attribute *rockchip_i2s_tdm_audio_debug_attrs[] = {
+	&dev_attr_audio_debug_tx_fifo_threshold.attr,
+	&dev_attr_audio_debug_tx_dma_maxburst.attr,
+	NULL,
+};
+
+static const struct attribute_group rockchip_i2s_tdm_audio_debug_group = {
+	.attrs = rockchip_i2s_tdm_audio_debug_attrs,
 };
 
 static int to_ch_num(unsigned int val)
@@ -680,9 +758,21 @@ static int rockchip_i2s_tdm_hw_params(struct snd_pcm_substream *substream,
 				      struct snd_soc_dai *dai)
 {
 	struct rk_i2s_tdm_dev *i2s_tdm = to_info(dai);
+	unsigned int tx_dma_maxburst;
+	unsigned int tx_fifo_threshold;
 	unsigned int val = 0;
 	unsigned int mclk_rate, bclk_rate, div_bclk = 4, div_lrck = 64;
 	int err;
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		tx_dma_maxburst = READ_ONCE(i2s_tdm->tx_dma_maxburst);
+		tx_fifo_threshold = READ_ONCE(i2s_tdm->tx_fifo_threshold);
+		WRITE_ONCE(i2s_tdm->playback_dma_data.maxburst,
+			   tx_dma_maxburst);
+		regmap_update_bits(i2s_tdm->regmap, I2S_DMACR,
+				   I2S_DMACR_TDL_MASK,
+				   I2S_DMACR_TDL(tx_fifo_threshold));
+	}
 
 	if (i2s_tdm->is_master_mode) {
 		struct clk *mclk;
@@ -1283,6 +1373,8 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 	spin_lock_init(&i2s_tdm->lock);
 	i2s_tdm->soc_data = device_get_match_data(&pdev->dev);
 	i2s_tdm->frame_width = 64;
+	i2s_tdm->tx_dma_maxburst = DEFAULT_TX_DMA_MAXBURST;
+	i2s_tdm->tx_fifo_threshold = DEFAULT_TX_FIFO_THRESHOLD;
 
 	i2s_tdm->clk_trcm = TRCM_TXRX;
 	if (of_property_read_bool(node, "rockchip,trcm-sync-tx-only"))
@@ -1353,7 +1445,7 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 	if (i2s_tdm->has_playback) {
 		i2s_tdm->playback_dma_data.addr = res->start + I2S_TXDR;
 		i2s_tdm->playback_dma_data.addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
-		i2s_tdm->playback_dma_data.maxburst = 8;
+		i2s_tdm->playback_dma_data.maxburst = DEFAULT_TX_DMA_MAXBURST;
 	}
 
 	if (i2s_tdm->has_capture) {
@@ -1391,7 +1483,7 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 	pm_runtime_enable(&pdev->dev);
 
 	regmap_update_bits(i2s_tdm->regmap, I2S_DMACR, I2S_DMACR_TDL_MASK,
-			   I2S_DMACR_TDL(16));
+			   I2S_DMACR_TDL(i2s_tdm->tx_fifo_threshold));
 	regmap_update_bits(i2s_tdm->regmap, I2S_DMACR, I2S_DMACR_RDL_MASK,
 			   I2S_DMACR_RDL(16));
 	regmap_update_bits(i2s_tdm->regmap, I2S_CKR, I2S_CKR_TRCM_MASK,
@@ -1413,6 +1505,16 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 	if (ret) {
 		dev_err(&pdev->dev, "Could not register PCM\n");
 		goto err_suspend;
+	}
+
+	if (i2s_tdm->has_playback) {
+		ret = devm_device_add_group(&pdev->dev,
+					    &rockchip_i2s_tdm_audio_debug_group);
+		if (ret) {
+			dev_err(&pdev->dev,
+				"Could not register audio debug controls\n");
+			goto err_suspend;
+		}
 	}
 
 	return 0;
