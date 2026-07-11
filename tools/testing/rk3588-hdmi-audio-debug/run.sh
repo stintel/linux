@@ -24,6 +24,8 @@ usage()
 Usage: $0 baseline
        $0 matrix
        $0 run CASE [auto|0|1] [auto|0xNNNN] [current|0-20] [FORMAT]
+                   [current|1-31] [current|1-16]
+       $0 fifo CASE TX_FIFO_THRESHOLD TX_DMA_MAXBURST [FORMAT]
        $0 status
        $0 restore
        $0 list
@@ -92,6 +94,8 @@ discover_i2s_sysfs()
 	local dir
 
 	if [[ -n $I2S_SYSFS_DIR ]]; then
+		[[ -d $I2S_SYSFS_DIR ]] ||
+			die "Rockchip I2S sysfs directory not found: $I2S_SYSFS_DIR"
 		return
 	fi
 
@@ -104,11 +108,20 @@ discover_i2s_sysfs()
 	done
 }
 
-restore_auto()
+restore_debug_defaults()
 {
 	if [[ -n $SYSFS_DIR && -e $SYSFS_DIR/audio_debug_layout ]]; then
 		echo auto > "$SYSFS_DIR/audio_debug_layout" || true
 		echo auto > "$SYSFS_DIR/audio_debug_sample_present" || true
+	fi
+
+	if [[ -n $I2S_SYSFS_DIR ]]; then
+		if [[ -w $I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold ]]; then
+			echo 16 > "$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold" || true
+		fi
+		if [[ -w $I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst ]]; then
+			echo 8 > "$I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst" || true
+		fi
 	fi
 }
 
@@ -124,7 +137,7 @@ stop_runner()
 cleanup()
 {
 	stop_runner
-	restore_auto
+	restore_debug_defaults
 }
 
 case_parameters()
@@ -223,6 +236,10 @@ capture_snapshot()
 	capture_file "$PREFILL_PARAM" "$snapshot/i2s-tx-fifo-prefill-us"
 
 	if [[ -n $I2S_SYSFS_DIR ]]; then
+		capture_file "$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold" \
+			"$snapshot/i2s-tx-fifo-threshold"
+		capture_file "$I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst" \
+			"$snapshot/i2s-tx-dma-maxburst"
 		capture_file "$I2S_SYSFS_DIR/power/runtime_status" \
 			"$snapshot/i2s-runtime-status"
 		capture_file "$I2S_SYSFS_DIR/uevent" "$snapshot/i2s-uevent"
@@ -242,7 +259,11 @@ run_case()
 	local sample_present=${3:-auto}
 	local prefill=${4:-current}
 	local format_override=${5:-}
+	local fifo_threshold=${6:-current}
+	local dma_maxburst=${7:-current}
 	local active_prefill=unavailable
+	local active_fifo_threshold=unavailable
+	local active_dma_maxburst=unavailable
 	local timestamp
 	local case_dir
 	local rc
@@ -260,6 +281,12 @@ run_case()
 		die "Sample_Present must be auto or a 16-bit hexadecimal value"
 	[[ $prefill == current || $prefill =~ ^([0-9]|1[0-9]|20)$ ]] ||
 		die "TX FIFO prefill must be current or an integer from 0 through 20"
+	[[ $fifo_threshold == current ||
+	   $fifo_threshold =~ ^([1-9]|[12][0-9]|3[01])$ ]] ||
+		die "TX FIFO threshold must be current or an integer from 1 through 31"
+	[[ $dma_maxburst == current ||
+	   $dma_maxburst =~ ^([1-9]|1[0-6])$ ]] ||
+		die "TX DMA maxburst must be current or an integer from 1 through 16"
 	if [[ -e $PREFILL_PARAM ]]; then
 		if [[ $prefill != current ]]; then
 			echo "$prefill" > "$PREFILL_PARAM"
@@ -268,9 +295,28 @@ run_case()
 	elif [[ $prefill != current ]]; then
 		die "TX FIFO prefill control is unavailable"
 	fi
+	if [[ -e $I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold ]]; then
+		if [[ $fifo_threshold != current ]]; then
+			echo "$fifo_threshold" > \
+				"$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold"
+		fi
+		active_fifo_threshold=$(<"$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold")
+	elif [[ $fifo_threshold != current ]]; then
+		die "TX FIFO threshold control is unavailable"
+	fi
+	if [[ -e $I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst ]]; then
+		if [[ $dma_maxburst != current ]]; then
+			echo "$dma_maxburst" > \
+				"$I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst"
+		fi
+		active_dma_maxburst=$(<"$I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst")
+	elif [[ $dma_maxburst != current ]]; then
+		die "TX DMA maxburst control is unavailable"
+	fi
 	timestamp=$(date '+%Y%m%d-%H%M%S')
 	case_dir=$RESULT_ROOT/${timestamp}-${name}-format-${FORMAT}-layout-${layout}
 	case_dir+=-sp-${sample_present}-prefill-${active_prefill}
+	case_dir+=-tdl-${active_fifo_threshold}-burst-${active_dma_maxburst}
 	case_dir=${case_dir//0x/}
 	mkdir -p "$case_dir"
 
@@ -285,6 +331,8 @@ run_case()
 		echo "layout=$layout"
 		echo "sample_present=$sample_present"
 		echo "tx_fifo_prefill_us=$active_prefill"
+		echo "tx_fifo_threshold=$active_fifo_threshold"
+		echo "tx_dma_maxburst=$active_dma_maxburst"
 		echo "sysfs=$SYSFS_DIR"
 		echo "i2s_sysfs=${I2S_SYSFS_DIR:-unavailable}"
 		echo "pcm=hw:CARD=$CARD,DEV=$PCM_DEVICE"
@@ -298,7 +346,10 @@ run_case()
 	iecset -D "hw:$CARD" aud on rat 0 > "$case_dir/iecset" 2>&1
 	echo 1 > "$SYSFS_DIR/audio_debug_clear_errors"
 
-	echo "running $name layout=$layout sample_present=$sample_present prefill=$active_prefill"
+	printf 'running %s layout=%s sample_present=%s prefill=%s ' \
+		"$name" "$layout" "$sample_present" "$active_prefill"
+	printf 'tdl=%s maxburst=%s\n' \
+		"$active_fifo_threshold" "$active_dma_maxburst"
 	timeout --signal=TERM --kill-after=1 "$DURATION" \
 		speaker-test -D "hw:CARD=$CARD,DEV=$PCM_DEVICE" \
 		-F "$FORMAT" -c "$CHANNELS" -r "$RATE" -t sine \
@@ -339,11 +390,11 @@ run_baseline()
 {
 	local automatic=auto
 
-	run_case 8ch-48k "$automatic" "$automatic"
-	run_case 2ch-96k "$automatic" "$automatic"
-	run_case 4ch-96k "$automatic" "$automatic"
-	run_case 8ch-96k "$automatic" "$automatic"
-	run_case 2ch-192k "$automatic" "$automatic"
+	run_case 8ch-48k "$automatic" "$automatic" current "" 16 8
+	run_case 2ch-96k "$automatic" "$automatic" current "" 16 8
+	run_case 4ch-96k "$automatic" "$automatic" current "" 16 8
+	run_case 8ch-96k "$automatic" "$automatic" current "" 16 8
+	run_case 2ch-192k "$automatic" "$automatic" current "" 16 8
 }
 
 run_matrix()
@@ -379,7 +430,7 @@ list)
 	echo '2ch-192k 2ch-192k-s16 8ch-192k'
 	exit 0
 	;;
-baseline|matrix|run|status|restore)
+baseline|matrix|run|fifo|status|restore)
 	;;
 *)
 	usage
@@ -392,7 +443,8 @@ discover_hdmi_sysfs
 [[ -w $SYSFS_DIR/audio_debug_layout ]] ||
 	die "diagnostic controls below $SYSFS_DIR are not writable"
 
-if [[ $command == baseline || $command == matrix || $command == run ]]; then
+if [[ $command == baseline || $command == matrix || $command == run ||
+      $command == fifo ]]; then
 	need_command iecset
 	need_command speaker-test
 	need_command timeout
@@ -407,22 +459,47 @@ if [[ $command == baseline || $command == matrix || $command == run ]]; then
 	trap 'exit 143' TERM
 fi
 
+if [[ $command == status || $command == restore ]]; then
+	discover_i2s_sysfs
+fi
+
 case $command in
 restore)
-	restore_auto
-	echo "restored automatic Layout and Sample_Present generation"
+	restore_debug_defaults
+	echo "restored automatic packet generation, TX FIFO threshold 16, and TX DMA maxburst 8"
 	;;
 status)
+	printf 'layout='
 	cat "$SYSFS_DIR/audio_debug_layout"
+	printf 'sample_present='
 	cat "$SYSFS_DIR/audio_debug_sample_present"
+	if [[ -n $I2S_SYSFS_DIR ]]; then
+		printf 'tx_fifo_threshold='
+		cat "$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold"
+		printf 'tx_dma_maxburst='
+		cat "$I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst"
+	fi
 	cat "$SYSFS_DIR/audio_debug_status"
 	;;
 run)
-	[[ $# -ge 2 && $# -le 6 ]] ||
-		die "run requires CASE [LAYOUT] [SAMPLE_PRESENT] [PREFILL_US] [FORMAT]"
+	[[ $# -ge 2 && $# -le 8 ]] ||
+		die "run requires CASE [LAYOUT] [SAMPLE_PRESENT] [PREFILL_US]" \
+			"[FORMAT] [FIFO_THRESHOLD] [DMA_MAXBURST]"
 	RESULT_ROOT=$RESULT_PARENT/rk3588-hdmi-audio-$(date '+%Y%m%d-%H%M%S')
 	mkdir -p "$RESULT_ROOT"
-	run_case "$2" "${3:-auto}" "${4:-auto}" "${5:-current}" "${6:-}"
+	run_case "$2" "${3:-auto}" "${4:-auto}" "${5:-current}" "${6:-}" \
+		"${7:-current}" "${8:-current}"
+	echo "results: $RESULT_ROOT"
+	;;
+fifo)
+	fifo_layout=auto
+	fifo_sample_present=auto
+	[[ $# -ge 4 && $# -le 5 ]] ||
+		die "fifo requires CASE TX_FIFO_THRESHOLD TX_DMA_MAXBURST [FORMAT]"
+	RESULT_ROOT=$RESULT_PARENT/rk3588-hdmi-audio-$(date '+%Y%m%d-%H%M%S')
+	mkdir -p "$RESULT_ROOT"
+	run_case "$2" "$fifo_layout" "$fifo_sample_present" current \
+		"${5:-}" "$3" "$4"
 	echo "results: $RESULT_ROOT"
 	;;
 baseline)
