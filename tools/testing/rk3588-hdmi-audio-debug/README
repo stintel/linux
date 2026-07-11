@@ -1,0 +1,102 @@
+RK3588 DW HDMI QP audio packet diagnostics
+===========================================
+
+This directory contains local hardware test tooling.  It is not a kernel
+selftest and the audio_debug_* sysfs files are not a stable userspace ABI.
+
+Scope
+-----
+
+The tests use ordinary S32_LE LPCM through the HDMI hardware PCM.  They do
+not test IEC 61937, DTS-HD, TrueHD, MAT, or userspace IEC958 conversion.
+Keep the display active while testing; the driver rejects diagnostic MMIO
+reads when the HDMI link is disabled.
+
+Run the complete matrix as root:
+
+  tools/testing/rk3588-hdmi-audio-debug/run.sh matrix
+
+Run only the five automatic-mode baselines:
+
+  tools/testing/rk3588-hdmi-audio-debug/run.sh baseline
+
+Run one case, optionally selecting Layout and Sample_Present modes:
+
+  tools/testing/rk3588-hdmi-audio-debug/run.sh run 4ch-96k 1 0x0003
+
+Restore both controls without starting a stream:
+
+  tools/testing/rk3588-hdmi-audio-debug/run.sh restore
+
+The result root defaults to a timestamped directory below the current
+directory.  Set RK3588_HDMI_AUDIO_RESULTS to place it elsewhere, and set
+RK3588_HDMI_AUDIO_DURATION to change the default eight-second case duration.
+
+Matrix
+------
+
+The baseline runs these known-good and known-bad cases with both controls in
+automatic mode:
+
+  case       channels  rate       known hardware result
+  8ch-48k       8       48000      clean
+  2ch-96k       2       96000      clean
+  4ch-96k       4       96000      corrupt
+  8ch-96k       8       96000      corrupt
+  2ch-192k      2      192000      corrupt
+
+For each known-bad case, matrix additionally runs:
+
+  case       layout only  Sample_Present only  both
+  4ch-96k       1              0x0003           1 / 0x0003
+  8ch-96k       1              0x000f           1 / 0x000f
+  2ch-192k      0              0x000f           0 / 0x000f
+
+HDMI defines Layout 0 for a stereo pair sampled up to four times in one
+Audio Sample Packet, and Layout 1 for up to four channel pairs sampled once.
+The four low Sample_Present bits correspond to the packet's four subpackets.
+Consequently, 0x3 selects the first two Layout 1 channel pairs, while 0xf
+selects all four Layout 1 pairs or all four Layout 0 temporal samples.  The
+RK3588 TRM also says that non-3D audio uses no bits above this low nibble.
+
+These combinations are structurally valid HDMI packet descriptions, but
+forcing them continuously is still a test hypothesis.  No public RK3588 QP
+implementation was found that programs these override fields, and automatic
+Sample_Present may vary with packet cadence.  Do not treat the values as a
+permanent policy without hardware results.
+
+Captured state
+--------------
+
+After speaker-test reaches ALSA RUNNING, each case captures state at about
+100 ms, 300 ms, one second, and three seconds.  Every snapshot contains:
+
+* ALSA hw_params and runtime status;
+* DW HDMI QP audio interface, packetizer, ACR, packet scheduler, clock
+  monitor, and AVP error state;
+* configured Layout and Sample_Present controls;
+* Rockchip I2S runtime-PM state and relevant kernel messages.
+
+The script clears only the documented audio error bits immediately before
+starting each stream.  The status output decodes them as follows:
+
+  invalid_sample_present
+    The packetizer rejected the Sample_Present configuration.  If this
+    appears only with an override, reject that mask.
+
+  fifo_underflow
+    The QP audio-interface FIFO ran out of input data.
+
+  fifo_overflow
+    The QP audio-interface FIFO received data faster than it drained.
+
+  i2s_ws
+    The QP detected an I2S word-select protocol error.
+
+  i2s_bbit
+    The QP detected disparity between received IEC60958 B bits.
+
+If corruption occurs while all five remain clear, these detectors do not
+support a FIFO starvation or I2S framing explanation.  Compare automatic and
+forced packetizer state next; do not infer that a forced combination is
+correct merely because the AVR remains locked.
