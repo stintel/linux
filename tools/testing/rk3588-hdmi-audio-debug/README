@@ -24,6 +24,16 @@ Run one case, optionally selecting Layout and Sample_Present modes:
 
   tools/testing/rk3588-hdmi-audio-debug/run.sh run 4ch-96k 1 0x0003
 
+The optional final argument sets the temporary Rockchip TX FIFO prefill delay
+for the next stream.  For example, test 4-channel 96 kHz LPCM with automatic
+packet generation and a 1 microsecond prefill delay:
+
+  tools/testing/rk3588-hdmi-audio-debug/run.sh run 4ch-96k auto auto 1
+
+Accepted delays are 0 through 20 microseconds.  If omitted, the script leaves
+the current module parameter unchanged.  The selected value is captured in
+the case metadata and every timed snapshot.
+
 Restore both controls without starting a stream:
 
   tools/testing/rk3588-hdmi-audio-debug/run.sh restore

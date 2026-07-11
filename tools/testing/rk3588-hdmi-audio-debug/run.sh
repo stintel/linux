@@ -14,6 +14,7 @@ DURATION=${RK3588_HDMI_AUDIO_DURATION:-8}
 RESULT_PARENT=${RK3588_HDMI_AUDIO_RESULTS:-$PWD}
 SYSFS_DIR=${RK3588_HDMI_AUDIO_SYSFS:-}
 I2S_SYSFS_DIR=${RK3588_HDMI_I2S_SYSFS:-}
+PREFILL_PARAM=/sys/module/snd_soc_rockchip_i2s_tdm/parameters/tx_fifo_prefill_us
 PROC_PCM=/proc/asound/$CARD/pcm${PCM_DEVICE}p/sub0
 RUNNER_PID=
 
@@ -22,7 +23,7 @@ usage()
 	cat <<EOF
 Usage: $0 baseline
        $0 matrix
-       $0 run CASE [auto|0|1] [auto|0xNNNN]
+       $0 run CASE [auto|0|1] [auto|0xNNNN] [current|0-20]
        $0 status
        $0 restore
        $0 list
@@ -200,6 +201,7 @@ capture_snapshot()
 		"$snapshot/qp-configured-layout"
 	capture_file "$SYSFS_DIR/audio_debug_sample_present" \
 		"$snapshot/qp-configured-sample-present"
+	capture_file "$PREFILL_PARAM" "$snapshot/i2s-tx-fifo-prefill-us"
 
 	if [[ -n $I2S_SYSFS_DIR ]]; then
 		capture_file "$I2S_SYSFS_DIR/power/runtime_status" \
@@ -219,6 +221,8 @@ run_case()
 	local name=$1
 	local layout=${2:-auto}
 	local sample_present=${3:-auto}
+	local prefill=${4:-current}
+	local active_prefill=unavailable
 	local timestamp
 	local case_dir
 	local rc
@@ -229,8 +233,19 @@ run_case()
 	[[ $sample_present == auto ||
 	   $sample_present =~ ^0[xX][[:xdigit:]]{1,4}$ ]] ||
 		die "Sample_Present must be auto or a 16-bit hexadecimal value"
+	[[ $prefill == current || $prefill =~ ^([0-9]|1[0-9]|20)$ ]] ||
+		die "TX FIFO prefill must be current or an integer from 0 through 20"
+	if [[ -e $PREFILL_PARAM ]]; then
+		if [[ $prefill != current ]]; then
+			echo "$prefill" > "$PREFILL_PARAM"
+		fi
+		active_prefill=$(<"$PREFILL_PARAM")
+	elif [[ $prefill != current ]]; then
+		die "TX FIFO prefill control is unavailable"
+	fi
 	timestamp=$(date '+%Y%m%d-%H%M%S')
-	case_dir=$RESULT_ROOT/${timestamp}-${name}-layout-${layout}-sp-${sample_present}
+	case_dir=$RESULT_ROOT/${timestamp}-${name}-layout-${layout}
+	case_dir+=-sp-${sample_present}-prefill-${active_prefill}
 	case_dir=${case_dir//0x/}
 	mkdir -p "$case_dir"
 
@@ -244,6 +259,7 @@ run_case()
 		echo "format=S32_LE"
 		echo "layout=$layout"
 		echo "sample_present=$sample_present"
+		echo "tx_fifo_prefill_us=$active_prefill"
 		echo "sysfs=$SYSFS_DIR"
 		echo "i2s_sysfs=${I2S_SYSFS_DIR:-unavailable}"
 		echo "pcm=hw:CARD=$CARD,DEV=$PCM_DEVICE"
@@ -257,7 +273,7 @@ run_case()
 	iecset -D "hw:$CARD" aud on rat 0 > "$case_dir/iecset" 2>&1
 	echo 1 > "$SYSFS_DIR/audio_debug_clear_errors"
 
-	echo "running $name layout=$layout sample_present=$sample_present"
+	echo "running $name layout=$layout sample_present=$sample_present prefill=$active_prefill"
 	timeout --signal=TERM --kill-after=1 "$DURATION" \
 		speaker-test -D "hw:CARD=$CARD,DEV=$PCM_DEVICE" \
 		-F S32_LE -c "$CHANNELS" -r "$RATE" -t sine \
@@ -376,10 +392,11 @@ status)
 	cat "$SYSFS_DIR/audio_debug_status"
 	;;
 run)
-	[[ $# -ge 2 && $# -le 4 ]] || die "run requires CASE [LAYOUT] [SAMPLE_PRESENT]"
+	[[ $# -ge 2 && $# -le 5 ]] ||
+		die "run requires CASE [LAYOUT] [SAMPLE_PRESENT] [PREFILL_US]"
 	RESULT_ROOT=$RESULT_PARENT/rk3588-hdmi-audio-$(date '+%Y%m%d-%H%M%S')
 	mkdir -p "$RESULT_ROOT"
-	run_case "$2" "${3:-auto}" "${4:-auto}"
+	run_case "$2" "${3:-auto}" "${4:-auto}" "${5:-current}"
 	echo "results: $RESULT_ROOT"
 	;;
 baseline)
