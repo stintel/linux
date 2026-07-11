@@ -15,7 +15,12 @@
 #define VER_TYPE					0x8
 #define CONFIG_REG					0xc
 #define CONFIG_CEC					BIT(28)
+#define CONFIG_EARCRX					BIT(24)
 #define CONFIG_AUD_UD					BIT(23)
+#define CONFIG_AUD_MS					BIT(22)
+#define CONFIG_AUD_HBR					BIT(21)
+#define CONFIG_AUD_3D					BIT(20)
+#define CONFIG_AVP					BIT(0)
 #define CORE_TIMESTAMP_HHMM				0x14
 #define CORE_TIMESTAMP_MMDD				0x18
 #define CORE_TIMESTAMP_YYYY				0x1c
@@ -398,11 +403,15 @@
 #define PKT5_EMP_CVTEM_CONTENTS7			0xddc
 /* Audio Packetizer Registers */
 #define AUDPKT_CONTROL0					0xe20
+#define AUDPKT_SAMPLE_PRESENT_OVR_EN			BIT(16)
 #define AUDPKT_PBIT_FORCE_EN_MASK			BIT(12)
 #define AUDPKT_PBIT_FORCE_EN				BIT(12)
+#define AUDPKT_LAYOUT_OVR_EN				BIT(9)
+#define AUDPKT_LAYOUT_OVR_VALUE				BIT(8)
 #define AUDPKT_CHSTATUS_OVR_EN_MASK			BIT(0)
 #define AUDPKT_CHSTATUS_OVR_EN				BIT(0)
 #define AUDPKT_CONTROL1					0xe24
+#define AUDPKT_SAMPLE_PRESENT_OVR_VALUE			GENMASK(15, 0)
 #define AUDPKT_ACR_CONTROL0				0xe40
 #define AUDPKT_ACR_N_VALUE				0xfffff
 #define AUDPKT_ACR_CONTROL1				0xe44
@@ -802,8 +811,12 @@
 /* AVPUNIT Interrupt Registers */
 #define AVP_INTVEC_INDEX				0x3800
 #define AVP_0_INT_STATUS				0x3810
+#define AUDPKT_INVALID_SAMPLE_PRESENT_IRQ		BIT(24)
+#define AUDFIFO_UDF_IRQ					BIT(16)
 #define AVP_0_INT_MASK_N				0x3814
 #define AVP_0_INT_CLEAR					0x3818
+#define AUDPKT_INVALID_SAMPLE_PRESENT_CLEAR		BIT(24)
+#define AUDFIFO_UDF_CLEAR				BIT(16)
 #define AVP_0_INT_FORCE					0x381c
 #define AVP_1_INT_STATUS				0x3820
 #define AVP_1_INT_MASK_N				0x3824
@@ -819,8 +832,14 @@
 #define AVP_3_INT_CLEAR					0x3848
 #define AVP_3_INT_FORCE					0x384c
 #define AVP_4_INT_STATUS				0x3850
+#define I2S_BBIT_ERR_IRQ				BIT(9)
+#define I2S_WS_ERR_IRQ					BIT(8)
+#define AUDFIFO_OVF_IRQ					BIT(4)
 #define AVP_4_INT_MASK_N				0x3854
 #define AVP_4_INT_CLEAR					0x3858
+#define I2S_BBIT_ERR_CLEAR				BIT(9)
+#define I2S_WS_ERR_CLEAR				BIT(8)
+#define AUDFIFO_OVF_CLEAR				BIT(4)
 #define AVP_4_INT_FORCE					0x385c
 #define AVP_5_INT_STATUS				0x3860
 #define AVP_5_INT_MASK_N				0x3864

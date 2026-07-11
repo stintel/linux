@@ -592,6 +592,11 @@ static int dw_hdmi_qp_rockchip_bind(struct device *dev, struct device *master,
 		return dev_err_probe(dev, PTR_ERR(connector),
 				     "Failed to init bridge connector\n");
 
+	ret = dw_hdmi_qp_audio_debug_register(hdmi->hdmi);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "Failed to register HDMI audio diagnostics\n");
+
 	enable_irq(irq);
 
 	return 0;
@@ -603,6 +608,7 @@ static void dw_hdmi_qp_rockchip_unbind(struct device *dev,
 {
 	struct rockchip_hdmi_qp *hdmi = dev_get_drvdata(dev);
 
+	dw_hdmi_qp_audio_debug_unregister(hdmi->hdmi);
 	cancel_delayed_work_sync(&hdmi->hpd_work);
 }
 

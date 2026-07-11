@@ -7,7 +7,9 @@
  * Author: Algea Cao <algea.cao@rock-chips.com>
  * Author: Cristian Ciocaltea <cristian.ciocaltea@collabora.com>
  */
+#include <linux/bitfield.h>
 #include <linux/completion.h>
+#include <linux/device.h>
 #include <linux/hdmi.h>
 #include <linux/export.h>
 #include <linux/i2c.h>
@@ -170,7 +172,22 @@ struct dw_hdmi_qp {
 
 	unsigned long tmds_char_rate;
 	bool no_hpd;
+
+	/* Temporary diagnostics; not an upstream userspace ABI. */
+	struct {
+		struct mutex lock; /* serializes audio register access */
+		struct device_attribute status_attr;
+		struct device_attribute clear_errors_attr;
+		struct attribute *attrs[3];
+		struct attribute_group group;
+		bool registered;
+	} audio_debug;
 };
+
+#define AVP_0_AUDIO_ERROR_CLEAR_MASK \
+	(AUDPKT_INVALID_SAMPLE_PRESENT_CLEAR | AUDFIFO_UDF_CLEAR)
+#define AVP_4_AUDIO_ERROR_CLEAR_MASK \
+	(I2S_BBIT_ERR_CLEAR | I2S_WS_ERR_CLEAR | AUDFIFO_OVF_CLEAR)
 
 static void dw_hdmi_qp_write(struct dw_hdmi_qp *hdmi, unsigned int val,
 			     int offset)
@@ -192,6 +209,264 @@ static void dw_hdmi_qp_mod(struct dw_hdmi_qp *hdmi, unsigned int data,
 {
 	regmap_update_bits(hdmi->regm, reg, mask, data);
 }
+
+static void dw_hdmi_qp_audio_clear_errors(struct dw_hdmi_qp *hdmi)
+{
+	/* AVP interrupt clear registers are write-only and W1C. */
+	dw_hdmi_qp_write(hdmi, AVP_0_AUDIO_ERROR_CLEAR_MASK,
+			 AVP_0_INT_CLEAR);
+	dw_hdmi_qp_write(hdmi, AVP_4_AUDIO_ERROR_CLEAR_MASK,
+			 AVP_4_INT_CLEAR);
+}
+
+struct dw_hdmi_qp_audio_debug_status {
+	u32 core_id;
+	u32 version;
+	u32 version_type;
+	u32 config;
+	u32 audio_if_config0;
+	u32 audio_if_status0;
+	u32 audpkt_control0;
+	u32 audpkt_control1;
+	u32 acr_control0;
+	u32 acr_control1;
+	u32 acr_status0;
+	u32 pkt_enable;
+	u32 pkt_status0;
+	u32 pkt_status1;
+	u32 cmu_status;
+	u32 cmu_audqpclk_freq;
+	u32 avp0_status;
+	u32 avp4_status;
+};
+
+static int
+dw_hdmi_qp_audio_debug_read_status(struct dw_hdmi_qp *hdmi,
+				   struct dw_hdmi_qp_audio_debug_status *status)
+{
+	static const unsigned int registers[] = {
+		CORE_ID,
+		VER_NUMBER,
+		VER_TYPE,
+		CONFIG_REG,
+		AUDIO_INTERFACE_CONFIG0,
+		AUDIO_INTERFACE_STATUS0,
+		AUDPKT_CONTROL0,
+		AUDPKT_CONTROL1,
+		AUDPKT_ACR_CONTROL0,
+		AUDPKT_ACR_CONTROL1,
+		AUDPKT_ACR_STATUS0,
+		PKTSCHED_PKT_EN,
+		PKTSCHED_PKT_STATUS0,
+		PKTSCHED_PKT_STATUS1,
+		CMU_STATUS,
+		CMU_AUDQPCLK_FREQ,
+		AVP_0_INT_STATUS,
+		AVP_4_INT_STATUS,
+	};
+	u32 *values = (u32 *)status;
+	unsigned int i;
+	int ret;
+
+	static_assert(sizeof(*status) == sizeof(registers));
+
+	for (i = 0; i < ARRAY_SIZE(registers); i++) {
+		ret = regmap_read(hdmi->regm, registers[i], &values[i]);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static struct dw_hdmi_qp *
+dw_hdmi_qp_from_audio_debug_status_attr(struct device_attribute *attr)
+{
+	struct dw_hdmi_qp *hdmi;
+
+	hdmi = container_of(attr, struct dw_hdmi_qp,
+			    audio_debug.status_attr);
+
+	return hdmi;
+}
+
+static struct dw_hdmi_qp *
+dw_hdmi_qp_from_audio_debug_clear_errors_attr(struct device_attribute *attr)
+{
+	struct dw_hdmi_qp *hdmi;
+
+	hdmi = container_of(attr, struct dw_hdmi_qp,
+			    audio_debug.clear_errors_attr);
+
+	return hdmi;
+}
+
+static ssize_t audio_debug_status_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct dw_hdmi_qp *hdmi =
+		dw_hdmi_qp_from_audio_debug_status_attr(attr);
+	struct dw_hdmi_qp_audio_debug_status status;
+	struct drm_device *drm = hdmi->bridge.dev;
+	ssize_t len = 0;
+	int ret;
+
+	if (!drm)
+		return -ENODEV;
+
+	drm_modeset_lock_all(drm);
+	mutex_lock(&hdmi->audio_debug.lock);
+
+	if (!hdmi->tmds_char_rate) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	ret = dw_hdmi_qp_audio_debug_read_status(hdmi, &status);
+	if (ret)
+		goto out_unlock;
+
+	len += sysfs_emit_at(buf, len,
+			     "core_id=0x%08x version=0x%08x version_type=0x%08x\n",
+			     status.core_id, status.version, status.version_type);
+	len += sysfs_emit_at(buf, len,
+			     "config=0x%08x avp=%u hbr=%u multistream=%u 3d=%u userdata=%u earcrx=%u cec=%u\n",
+			     status.config, !!(status.config & CONFIG_AVP),
+			     !!(status.config & CONFIG_AUD_HBR),
+			     !!(status.config & CONFIG_AUD_MS),
+			     !!(status.config & CONFIG_AUD_3D),
+			     !!(status.config & CONFIG_AUD_UD),
+			     !!(status.config & CONFIG_EARCRX),
+			     !!(status.config & CONFIG_CEC));
+	len += sysfs_emit_at(buf, len,
+			     "audio_if_config0=0x%08x audio_format=%u i2s_lines=0x%x bpcuv=%u\n",
+			     status.audio_if_config0,
+			     (unsigned int)FIELD_GET(AUD_FORMAT_MSK,
+						     status.audio_if_config0),
+			     (unsigned int)FIELD_GET(I2S_LINES_EN_MSK,
+						     status.audio_if_config0),
+			     !!(status.audio_if_config0 & I2S_BPCUV_RCV_MSK));
+	len += sysfs_emit_at(buf, len,
+			     "audio_if_status0=0x%08x pair_layout=0x%04x\n",
+			     status.audio_if_status0,
+			     (unsigned int)(status.audio_if_status0 &
+					    GENMASK(15, 0)));
+	len += sysfs_emit_at(buf, len,
+			     "audpkt_control0=0x%08x layout_override=%u layout=%u sample_present_override=%u\n",
+			     status.audpkt_control0,
+			     !!(status.audpkt_control0 & AUDPKT_LAYOUT_OVR_EN),
+			     !!(status.audpkt_control0 & AUDPKT_LAYOUT_OVR_VALUE),
+			     !!(status.audpkt_control0 & AUDPKT_SAMPLE_PRESENT_OVR_EN));
+	len += sysfs_emit_at(buf, len,
+			     "audpkt_control1=0x%08x sample_present=0x%04x\n",
+			     status.audpkt_control1,
+			     (unsigned int)
+			     FIELD_GET(AUDPKT_SAMPLE_PRESENT_OVR_VALUE,
+				       status.audpkt_control1));
+	len += sysfs_emit_at(buf, len,
+			     "acr_control0=0x%08x n=%u acr_control1=0x%08x cts_override=%u programmed_cts=%u acr_status0=0x%08x measured_cts=%u\n",
+			     status.acr_control0,
+			     FIELD_GET(AUDPKT_ACR_N_VALUE, status.acr_control0),
+			     status.acr_control1,
+			     !!(status.acr_control1 & AUDPKT_ACR_CTS_OVR_EN),
+			     (unsigned int)
+			     FIELD_GET(AUDPKT_ACR_CTS_OVR_VAL_MSK,
+				       status.acr_control1),
+			     status.acr_status0,
+			     FIELD_GET(AUDPKT_ACR_N_VALUE, status.acr_status0));
+	len += sysfs_emit_at(buf, len,
+			     "pkt_enable=0x%08x pkt_status0=0x%08x pkt_status1=0x%08x\n",
+			     status.pkt_enable, status.pkt_status0,
+			     status.pkt_status1);
+	len += sysfs_emit_at(buf, len,
+			     "cmu_status=0x%08x audclk_off=%u linkqpclk_off=%u vidqpclk_off=%u cmu_audqpclk_freq=0x%08x\n",
+			     status.cmu_status,
+			     !!(status.cmu_status & AUDCLK_OFF),
+			     !!(status.cmu_status & LINKQPCLK_OFF),
+			     !!(status.cmu_status & VIDQPCLK_OFF),
+			     status.cmu_audqpclk_freq);
+	len += sysfs_emit_at(buf, len,
+			     "avp0_status=0x%08x avp4_status=0x%08x\n",
+			     status.avp0_status, status.avp4_status);
+	len += sysfs_emit_at(buf, len,
+			     "errors invalid_sample_present=%u fifo_underflow=%u fifo_overflow=%u i2s_ws=%u i2s_bbit=%u\n",
+			     !!(status.avp0_status &
+				AUDPKT_INVALID_SAMPLE_PRESENT_IRQ),
+			     !!(status.avp0_status & AUDFIFO_UDF_IRQ),
+			     !!(status.avp4_status & AUDFIFO_OVF_IRQ),
+			     !!(status.avp4_status & I2S_WS_ERR_IRQ),
+			     !!(status.avp4_status & I2S_BBIT_ERR_IRQ));
+	ret = 0;
+
+out_unlock:
+	mutex_unlock(&hdmi->audio_debug.lock);
+	drm_modeset_unlock_all(drm);
+
+	return ret ? ret : len;
+}
+
+static ssize_t audio_debug_clear_errors_store(struct device *dev,
+					      struct device_attribute *attr,
+					      const char *buf, size_t count)
+{
+	struct dw_hdmi_qp *hdmi =
+		dw_hdmi_qp_from_audio_debug_clear_errors_attr(attr);
+	struct drm_device *drm = hdmi->bridge.dev;
+	int ret = 0;
+
+	if (!sysfs_streq(buf, "1"))
+		return -EINVAL;
+
+	if (!drm)
+		return -ENODEV;
+
+	drm_modeset_lock_all(drm);
+	mutex_lock(&hdmi->audio_debug.lock);
+
+	if (!hdmi->tmds_char_rate)
+		ret = -ENODEV;
+	else
+		dw_hdmi_qp_audio_clear_errors(hdmi);
+
+	mutex_unlock(&hdmi->audio_debug.lock);
+	drm_modeset_unlock_all(drm);
+
+	return ret ? ret : count;
+}
+
+int dw_hdmi_qp_audio_debug_register(struct dw_hdmi_qp *hdmi)
+{
+	int ret;
+
+	hdmi->audio_debug.status_attr = (struct device_attribute)
+		__ATTR_RO(audio_debug_status);
+	hdmi->audio_debug.clear_errors_attr = (struct device_attribute)
+		__ATTR_WO(audio_debug_clear_errors);
+	sysfs_attr_init(&hdmi->audio_debug.status_attr.attr);
+	sysfs_attr_init(&hdmi->audio_debug.clear_errors_attr.attr);
+
+	hdmi->audio_debug.attrs[0] = &hdmi->audio_debug.status_attr.attr;
+	hdmi->audio_debug.attrs[1] =
+		&hdmi->audio_debug.clear_errors_attr.attr;
+	hdmi->audio_debug.group.attrs = hdmi->audio_debug.attrs;
+
+	ret = device_add_group(hdmi->dev, &hdmi->audio_debug.group);
+	if (!ret)
+		hdmi->audio_debug.registered = true;
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dw_hdmi_qp_audio_debug_register);
+
+void dw_hdmi_qp_audio_debug_unregister(struct dw_hdmi_qp *hdmi)
+{
+	if (!hdmi->audio_debug.registered)
+		return;
+
+	device_remove_group(hdmi->dev, &hdmi->audio_debug.group);
+	hdmi->audio_debug.registered = false;
+}
+EXPORT_SYMBOL_GPL(dw_hdmi_qp_audio_debug_unregister);
 
 static struct dw_hdmi_qp *dw_hdmi_qp_from_bridge(struct drm_bridge *bridge)
 {
@@ -470,8 +745,10 @@ static int dw_hdmi_qp_audio_enable(struct drm_bridge *bridge,
 {
 	struct dw_hdmi_qp *hdmi = dw_hdmi_qp_from_bridge(bridge);
 
+	mutex_lock(&hdmi->audio_debug.lock);
 	if (hdmi->tmds_char_rate)
 		dw_hdmi_qp_mod(hdmi, 0, AVP_DATAPATH_PACKET_AUDIO_SWDISABLE, GLOBAL_SWDISABLE);
+	mutex_unlock(&hdmi->audio_debug.lock);
 
 	return 0;
 }
@@ -484,9 +761,6 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 	struct dw_hdmi_qp *hdmi = dw_hdmi_qp_from_bridge(bridge);
 	bool ref2stream = false;
 
-	if (!hdmi->tmds_char_rate)
-		return -ENODEV;
-
 	if (fmt->bit_clk_provider | fmt->frame_clk_provider) {
 		dev_err(hdmi->dev, "unsupported clock settings\n");
 		return -EINVAL;
@@ -495,9 +769,17 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 	if (fmt->bit_fmt == SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE)
 		ref2stream = true;
 
+	mutex_lock(&hdmi->audio_debug.lock);
+	if (!hdmi->tmds_char_rate) {
+		mutex_unlock(&hdmi->audio_debug.lock);
+		return -ENODEV;
+	}
+
+	dw_hdmi_qp_audio_clear_errors(hdmi);
 	dw_hdmi_qp_set_audio_interface(hdmi, fmt, hparms);
 	dw_hdmi_qp_set_sample_rate(hdmi, hdmi->tmds_char_rate, hparms->sample_rate);
 	dw_hdmi_qp_set_channel_status(hdmi, hparms->iec.status, ref2stream);
+	mutex_unlock(&hdmi->audio_debug.lock);
 	drm_atomic_helper_connector_hdmi_update_audio_infoframe(connector, &hparms->cea);
 
 	return 0;
@@ -527,10 +809,12 @@ static void dw_hdmi_qp_audio_disable(struct drm_bridge *bridge,
 {
 	struct dw_hdmi_qp *hdmi = dw_hdmi_qp_from_bridge(bridge);
 
+	mutex_lock(&hdmi->audio_debug.lock);
 	drm_atomic_helper_connector_hdmi_clear_audio_infoframe(connector);
 
 	if (hdmi->tmds_char_rate)
 		dw_hdmi_qp_audio_disable_regs(hdmi);
+	mutex_unlock(&hdmi->audio_debug.lock);
 }
 
 static int dw_hdmi_qp_i2c_read(struct dw_hdmi_qp *hdmi,
@@ -767,6 +1051,8 @@ static void dw_hdmi_qp_bridge_atomic_enable(struct drm_bridge *bridge,
 	if (WARN_ON(!conn_state))
 		return;
 
+	mutex_lock(&hdmi->audio_debug.lock);
+
 	if (hdmi->curr_conn->display_info.is_hdmi) {
 		op_mode = 0;
 		hdmi->tmds_char_rate = conn_state->hdmi.tmds_char_rate;
@@ -792,6 +1078,8 @@ static void dw_hdmi_qp_bridge_atomic_enable(struct drm_bridge *bridge,
 	dw_hdmi_qp_mod(hdmi, op_mode, OPMODE_DVI, LINK_CONFIG0);
 
 	drm_atomic_helper_connector_hdmi_update_infoframes(hdmi->curr_conn, state);
+
+	mutex_unlock(&hdmi->audio_debug.lock);
 }
 
 static void dw_hdmi_qp_bridge_atomic_disable(struct drm_bridge *bridge,
@@ -802,12 +1090,14 @@ static void dw_hdmi_qp_bridge_atomic_disable(struct drm_bridge *bridge,
 	if (!hdmi->curr_conn)
 		return;
 
+	mutex_lock(&hdmi->audio_debug.lock);
 	hdmi->tmds_char_rate = 0;
 
 	drm_scdc_stop_scrambling(hdmi->curr_conn);
 
 	hdmi->curr_conn = NULL;
 	hdmi->phy.ops->disable(hdmi, hdmi->phy.data);
+	mutex_unlock(&hdmi->audio_debug.lock);
 }
 
 static enum drm_connector_status
@@ -1341,6 +1631,7 @@ struct dw_hdmi_qp *dw_hdmi_qp_bind(struct platform_device *pdev,
 		return ERR_CAST(hdmi);
 
 	hdmi->dev = dev;
+	mutex_init(&hdmi->audio_debug.lock);
 
 	regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(regs))
