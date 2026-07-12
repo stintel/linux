@@ -758,9 +758,23 @@ static unsigned int dw_hdmi_qp_find_cts(struct dw_hdmi_qp *hdmi, unsigned long p
 	}
 }
 
+static bool dw_hdmi_qp_is_hbr_audio(struct hdmi_codec_daifmt *fmt,
+				    struct hdmi_codec_params *hparms)
+{
+	if (hparms->channels != 8)
+		return false;
+
+	if (fmt->bit_fmt == SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE)
+		return true;
+
+	return hparms->sample_rate >= 176400 &&
+	       (hparms->iec.status[0] & IEC958_AES0_NONAUDIO);
+}
+
 static void dw_hdmi_qp_set_audio_interface(struct dw_hdmi_qp *hdmi,
 					   struct hdmi_codec_daifmt *fmt,
-					   struct hdmi_codec_params *hparms)
+					   struct hdmi_codec_params *hparms,
+					   bool hbr_audio)
 {
 	u32 conf0 = 0;
 
@@ -796,17 +810,15 @@ static void dw_hdmi_qp_set_audio_interface(struct dw_hdmi_qp *hdmi,
 
 	dw_hdmi_qp_mod(hdmi, conf0, I2S_LINES_EN_MSK, AUDIO_INTERFACE_CONFIG0);
 
-	/*
-	 * Enable bpcuv generated internally for L-PCM, or received
-	 * from stream for NLPCM/HBR.
-	 */
+	/* Receive BPCUV from IEC958 subframes, otherwise generate it here. */
 	switch (fmt->bit_fmt) {
 	case SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE:
-		conf0 = (hparms->channels == 8) ? AUD_HBR : AUD_ASP;
+		conf0 = hbr_audio ? AUD_HBR : AUD_ASP;
 		conf0 |= I2S_BPCUV_RCV_EN;
 		break;
 	default:
-		conf0 = AUD_ASP | I2S_BPCUV_RCV_DIS;
+		conf0 = hbr_audio ? AUD_HBR : AUD_ASP;
+		conf0 |= I2S_BPCUV_RCV_DIS;
 		break;
 	}
 
@@ -948,6 +960,7 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 	char sample_present[16];
 	const char *layout;
 	const char *packet;
+	bool hbr_audio;
 	bool ref2stream = false;
 
 	if (fmt->bit_clk_provider | fmt->frame_clk_provider) {
@@ -957,6 +970,7 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 
 	if (fmt->bit_fmt == SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE)
 		ref2stream = true;
+	hbr_audio = dw_hdmi_qp_is_hbr_audio(fmt, hparms);
 
 	mutex_lock(&hdmi->audio_debug.lock);
 	if (!hdmi->tmds_char_rate) {
@@ -965,7 +979,7 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 	}
 
 	dw_hdmi_qp_audio_clear_errors(hdmi);
-	dw_hdmi_qp_set_audio_interface(hdmi, fmt, hparms);
+	dw_hdmi_qp_set_audio_interface(hdmi, fmt, hparms, hbr_audio);
 	acr = dw_hdmi_qp_set_sample_rate(hdmi, hdmi->tmds_char_rate,
 					 hparms->sample_rate);
 	dw_hdmi_qp_set_channel_status(hdmi, hparms->iec.status, ref2stream);
@@ -984,8 +998,7 @@ static int dw_hdmi_qp_audio_prepare(struct drm_bridge *bridge,
 	else
 		strscpy(sample_present, "auto", sizeof(sample_present));
 
-	packet = fmt->bit_fmt == SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE &&
-		 hparms->channels == 8 ? "HBR" : "ASP";
+	packet = hbr_audio ? "HBR" : "ASP";
 	dev_dbg(hdmi->dev,
 		"audio prepare: rate=%u channels=%u format=%d packet=%s layout=%s sample_present=%s n=%u cts=%u\n",
 		hparms->sample_rate, hparms->channels, fmt->bit_fmt, packet,
