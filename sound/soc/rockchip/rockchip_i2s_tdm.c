@@ -28,6 +28,8 @@
 #define DEFAULT_TX_FIFO_THRESHOLD		16
 #define MAX_TX_DMA_MAXBURST			16
 #define MAX_TX_FIFO_THRESHOLD			31
+#define RK3588_TX_FIFO_THRESHOLD_STEREO_HI	24
+#define RK3588_TX_FIFO_THRESHOLD_MULTI_HI	28
 #define CH_GRP_MAX				4  /* The max channel 8 / 2 */
 #define MULTIPLEX_CH_MAX			10
 
@@ -78,6 +80,7 @@ struct rk_i2s_soc_data {
 	int config_count;
 	const struct txrx_config *configs;
 	int (*init)(struct device *dev, u32 addr);
+	unsigned int (*get_tx_fifo_threshold)(const struct snd_pcm_hw_params *params);
 };
 
 struct rk_i2s_tdm_dev {
@@ -108,6 +111,7 @@ struct rk_i2s_tdm_dev {
 	unsigned int mclk_tx_freq;
 	unsigned int tx_dma_maxburst;
 	unsigned int tx_fifo_threshold;
+	unsigned int tx_fifo_threshold_override;
 };
 
 /* Temporary controls for diagnosing high-rate RK3588 HDMI playback. */
@@ -116,8 +120,13 @@ static ssize_t audio_debug_tx_fifo_threshold_show(struct device *dev,
 						  char *buf)
 {
 	struct rk_i2s_tdm_dev *i2s_tdm = dev_get_drvdata(dev);
+	unsigned int threshold;
 
-	return sysfs_emit(buf, "%u\n", READ_ONCE(i2s_tdm->tx_fifo_threshold));
+	threshold = READ_ONCE(i2s_tdm->tx_fifo_threshold_override);
+	if (!threshold)
+		return sysfs_emit(buf, "auto\n");
+
+	return sysfs_emit(buf, "%u\n", threshold);
 }
 
 static ssize_t audio_debug_tx_fifo_threshold_store(struct device *dev,
@@ -129,17 +138,32 @@ static ssize_t audio_debug_tx_fifo_threshold_store(struct device *dev,
 	unsigned int threshold;
 	int ret;
 
+	if (sysfs_streq(buf, "auto")) {
+		WRITE_ONCE(i2s_tdm->tx_fifo_threshold_override, 0);
+		return count;
+	}
+
 	ret = kstrtouint(buf, 0, &threshold);
 	if (ret)
 		return ret;
 	if (!threshold || threshold > MAX_TX_FIFO_THRESHOLD)
 		return -ERANGE;
 
-	WRITE_ONCE(i2s_tdm->tx_fifo_threshold, threshold);
+	WRITE_ONCE(i2s_tdm->tx_fifo_threshold_override, threshold);
 
 	return count;
 }
 static DEVICE_ATTR_RW(audio_debug_tx_fifo_threshold);
+
+static ssize_t audio_debug_tx_fifo_threshold_effective_show(struct device *dev,
+							    struct device_attribute *attr,
+							    char *buf)
+{
+	struct rk_i2s_tdm_dev *i2s_tdm = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", READ_ONCE(i2s_tdm->tx_fifo_threshold));
+}
+static DEVICE_ATTR_RO(audio_debug_tx_fifo_threshold_effective);
 
 static ssize_t audio_debug_tx_dma_maxburst_show(struct device *dev,
 						struct device_attribute *attr,
@@ -173,6 +197,7 @@ static DEVICE_ATTR_RW(audio_debug_tx_dma_maxburst);
 
 static struct attribute *rockchip_i2s_tdm_audio_debug_attrs[] = {
 	&dev_attr_audio_debug_tx_fifo_threshold.attr,
+	&dev_attr_audio_debug_tx_fifo_threshold_effective.attr,
 	&dev_attr_audio_debug_tx_dma_maxburst.attr,
 	NULL,
 };
@@ -753,6 +778,22 @@ static int rockchip_i2s_tdm_set_sysclk(struct snd_soc_dai *cpu_dai, int stream,
 	return 0;
 }
 
+static unsigned int
+rockchip_i2s_tdm_get_tx_fifo_threshold(struct rk_i2s_tdm_dev *i2s_tdm,
+				       const struct snd_pcm_hw_params *params)
+{
+	unsigned int threshold;
+
+	threshold = READ_ONCE(i2s_tdm->tx_fifo_threshold_override);
+	if (threshold)
+		return threshold;
+
+	if (i2s_tdm->soc_data && i2s_tdm->soc_data->get_tx_fifo_threshold)
+		return i2s_tdm->soc_data->get_tx_fifo_threshold(params);
+
+	return DEFAULT_TX_FIFO_THRESHOLD;
+}
+
 static int rockchip_i2s_tdm_hw_params(struct snd_pcm_substream *substream,
 				      struct snd_pcm_hw_params *params,
 				      struct snd_soc_dai *dai)
@@ -766,7 +807,9 @@ static int rockchip_i2s_tdm_hw_params(struct snd_pcm_substream *substream,
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		tx_dma_maxburst = READ_ONCE(i2s_tdm->tx_dma_maxburst);
-		tx_fifo_threshold = READ_ONCE(i2s_tdm->tx_fifo_threshold);
+		tx_fifo_threshold =
+			rockchip_i2s_tdm_get_tx_fifo_threshold(i2s_tdm, params);
+		WRITE_ONCE(i2s_tdm->tx_fifo_threshold, tx_fifo_threshold);
 		WRITE_ONCE(i2s_tdm->playback_dma_data.maxburst,
 			   tx_dma_maxburst);
 		regmap_update_bits(i2s_tdm->regmap, I2S_DMACR,
@@ -1120,6 +1163,23 @@ static const struct txrx_config rv1126_txrx_config[] = {
 	{ 0xff800000, 0x10260, RV1126_I2S0_CLK_TXONLY, RV1126_I2S0_CLK_RXONLY },
 };
 
+static unsigned int
+rk3588_i2s_tdm_get_tx_fifo_threshold(const struct snd_pcm_hw_params *params)
+{
+	unsigned int channels = params_channels(params);
+	unsigned int rate = params_rate(params);
+
+	if (rate <= 48000)
+		return DEFAULT_TX_FIFO_THRESHOLD;
+
+	if (channels == 2)
+		return rate > 96000 ?
+			RK3588_TX_FIFO_THRESHOLD_STEREO_HI :
+			DEFAULT_TX_FIFO_THRESHOLD;
+
+	return RK3588_TX_FIFO_THRESHOLD_MULTI_HI;
+}
+
 static const struct rk_i2s_soc_data px30_i2s_soc_data = {
 	.softrst_offset = 0x0300,
 	.configs = px30_txrx_config,
@@ -1150,6 +1210,10 @@ static const struct rk_i2s_soc_data rk3568_i2s_soc_data = {
 	.init = common_soc_init,
 };
 
+static const struct rk_i2s_soc_data rk3588_i2s_soc_data = {
+	.get_tx_fifo_threshold = rk3588_i2s_tdm_get_tx_fifo_threshold,
+};
+
 static const struct rk_i2s_soc_data rv1126_i2s_soc_data = {
 	.softrst_offset = 0x0300,
 	.configs = rv1126_txrx_config,
@@ -1162,7 +1226,7 @@ static const struct of_device_id rockchip_i2s_tdm_match[] = {
 	{ .compatible = "rockchip,rk1808-i2s-tdm", .data = &rk1808_i2s_soc_data },
 	{ .compatible = "rockchip,rk3308-i2s-tdm", .data = &rk3308_i2s_soc_data },
 	{ .compatible = "rockchip,rk3568-i2s-tdm", .data = &rk3568_i2s_soc_data },
-	{ .compatible = "rockchip,rk3588-i2s-tdm" },
+	{ .compatible = "rockchip,rk3588-i2s-tdm", .data = &rk3588_i2s_soc_data },
 	{ .compatible = "rockchip,rv1126-i2s-tdm", .data = &rv1126_i2s_soc_data },
 	{},
 };
