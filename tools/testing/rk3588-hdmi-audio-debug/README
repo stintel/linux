@@ -24,15 +24,17 @@ Run one case, optionally selecting Layout and Sample_Present modes:
 
   tools/testing/rk3588-hdmi-audio-debug/run.sh run 4ch-96k 1 0x0003
 
-The optional final argument sets the temporary Rockchip TX FIFO prefill delay
-for the next stream.  For example, test 4-channel 96 kHz LPCM with automatic
-packet generation and a 1 microsecond prefill delay:
+The optional arguments after FORMAT select a Rockchip TX FIFO threshold and
+DMA maxburst for the next stream.  The threshold accepts "auto" or 1 through
+31, while maxburst accepts 1 through 16.  For example, test 4-channel 96 kHz
+LPCM with threshold 28 and maxburst 8:
 
-  tools/testing/rk3588-hdmi-audio-debug/run.sh run 4ch-96k auto auto 1
+  tools/testing/rk3588-hdmi-audio-debug/run.sh fifo 4ch-96k 28 8
 
-Accepted delays are 0 through 20 microseconds.  If omitted, the script leaves
-the current module parameter unchanged.  The selected value is captured in
-the case metadata and every timed snapshot.
+In automatic mode RK3588 retains threshold 16 for rates through 48 kHz and
+for stereo through 96 kHz.  Stereo above 96 kHz uses 24, and multichannel
+above 48 kHz uses 28.  Maxburst remains 8.  The selected override mode and
+effective threshold are captured in every timed snapshot.
 
 Restore both controls without starting a stream:
 
@@ -45,17 +47,23 @@ RK3588_HDMI_AUDIO_DURATION to change the default eight-second case duration.
 Matrix
 ------
 
-The baseline runs these known-good and known-bad cases with both controls in
-automatic mode:
+The baseline runs these cases with HDMI packet controls and the RK3588 TX
+FIFO threshold in automatic mode:
 
-  case       channels  rate       known hardware result
-  8ch-48k       8       48000      clean
-  2ch-96k       2       96000      clean
-  4ch-96k       4       96000      corrupt
-  8ch-96k       8       96000      corrupt
-  2ch-192k      2      192000      corrupt
+  case       channels  rate       automatic threshold
+  8ch-48k       8       48000             16
+  2ch-96k       2       96000             16
+  4ch-96k       4       96000             28
+  8ch-96k       8       96000             28
+  2ch-192k      2      192000             24
 
-For each known-bad case, matrix additionally runs:
+All five combinations have played cleanly with those thresholds on the
+ROCK 5B+ test system.  With a fixed threshold of 16, the last three were
+historically corrupt.  Threshold 28 is unsafe for a two-channel carrier: it
+made both PCM and DTS consume data too quickly, while DTS was clean again at
+16 and 2-channel 192 kHz PCM was clean at 24.
+
+For each historically broken case, matrix additionally runs:
 
   case       layout only  Sample_Present only  both
   4ch-96k       1              0x0003           1 / 0x0003
@@ -85,6 +93,7 @@ After speaker-test reaches ALSA RUNNING, each case captures state at about
 * DW HDMI QP audio interface, packetizer, ACR, packet scheduler, clock
   monitor, and AVP error state;
 * configured Layout and Sample_Present controls;
+* Rockchip I2S threshold override and effective threshold;
 * Rockchip I2S runtime-PM state and relevant kernel messages.
 
 The script clears only the documented audio error bits immediately before

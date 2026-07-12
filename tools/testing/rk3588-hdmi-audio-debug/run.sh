@@ -24,7 +24,7 @@ usage()
 Usage: $0 baseline
        $0 matrix
        $0 run CASE [auto|0|1] [auto|0xNNNN] [current|0-20] [FORMAT]
-                   [current|1-31] [current|1-16]
+                   [current|auto|1-31] [current|1-16]
        $0 fifo CASE TX_FIFO_THRESHOLD TX_DMA_MAXBURST [FORMAT]
        $0 status
        $0 restore
@@ -117,7 +117,7 @@ restore_debug_defaults()
 
 	if [[ -n $I2S_SYSFS_DIR ]]; then
 		if [[ -w $I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold ]]; then
-			echo 16 > "$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold" || true
+			echo auto > "$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold" || true
 		fi
 		if [[ -w $I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst ]]; then
 			echo 8 > "$I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst" || true
@@ -238,6 +238,9 @@ capture_snapshot()
 	if [[ -n $I2S_SYSFS_DIR ]]; then
 		capture_file "$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold" \
 			"$snapshot/i2s-tx-fifo-threshold"
+		capture_file \
+			"$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold_effective" \
+			"$snapshot/i2s-tx-fifo-threshold-effective"
 		capture_file "$I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst" \
 			"$snapshot/i2s-tx-dma-maxburst"
 		capture_file "$I2S_SYSFS_DIR/power/runtime_status" \
@@ -281,9 +284,9 @@ run_case()
 		die "Sample_Present must be auto or a 16-bit hexadecimal value"
 	[[ $prefill == current || $prefill =~ ^([0-9]|1[0-9]|20)$ ]] ||
 		die "TX FIFO prefill must be current or an integer from 0 through 20"
-	[[ $fifo_threshold == current ||
+	[[ $fifo_threshold == current || $fifo_threshold == auto ||
 	   $fifo_threshold =~ ^([1-9]|[12][0-9]|3[01])$ ]] ||
-		die "TX FIFO threshold must be current or an integer from 1 through 31"
+		die "TX FIFO threshold must be current, auto, or an integer from 1 through 31"
 	[[ $dma_maxburst == current ||
 	   $dma_maxburst =~ ^([1-9]|1[0-6])$ ]] ||
 		die "TX DMA maxburst must be current or an integer from 1 through 16"
@@ -466,7 +469,7 @@ fi
 case $command in
 restore)
 	restore_debug_defaults
-	echo "restored automatic packet generation, TX FIFO threshold 16, and TX DMA maxburst 8"
+	echo "restored automatic packet generation and TX FIFO threshold, and TX DMA maxburst 8"
 	;;
 status)
 	printf 'layout='
@@ -474,8 +477,10 @@ status)
 	printf 'sample_present='
 	cat "$SYSFS_DIR/audio_debug_sample_present"
 	if [[ -n $I2S_SYSFS_DIR ]]; then
-		printf 'tx_fifo_threshold='
+		printf 'tx_fifo_threshold_override='
 		cat "$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold"
+		printf 'tx_fifo_threshold_effective='
+		cat "$I2S_SYSFS_DIR/audio_debug_tx_fifo_threshold_effective"
 		printf 'tx_dma_maxburst='
 		cat "$I2S_SYSFS_DIR/audio_debug_tx_dma_maxburst"
 	fi
